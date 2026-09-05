@@ -1,0 +1,30 @@
+{
+	admin off
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$STAGING_HOSTNAME} {
+	header {
+		Cache-Control "no-store"
+		X-Robots-Tag "noindex, nofollow"
+	}
+
+	@health {
+		method GET
+		path /healthz
+	}
+	handle @health {
+		header Content-Type "application/json"
+		respond `{"environment":"staging","application_ready":false,"infrastructure_ready":true}` 200
+	}
+
+	handle {
+		header {
+			Content-Type "text/plain; charset=utf-8"
+			Retry-After "300"
+		}
+		respond "FireISP: entorno de pruebas en preparación." 503
+	}
+}
