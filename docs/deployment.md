@@ -9,6 +9,20 @@ maintenance response, and an infrastructure health endpoint. Django, customer
 data, Finkok integration, and router integration are not installed. A successful
 health check does not mean the FireISP application exists or is ready.
 
+## Verified staging status
+
+Public HTTPS was verified on 2026-09-05 after inbound TCP ports 80 and 443
+were opened in the provider firewall. The certificate chain and hostname
+validated successfully using the client's normal trust store, with TLS 1.3
+and a Let's Encrypt certificate. Caddy manages renewal using its persistent
+data volume.
+
+External checks passed: HTTP redirects to HTTPS with status 308;
+`GET /healthz` returns status 200 and `application_ready: false`; the root
+page returns the intentional maintenance status 503 with `Retry-After: 300`.
+The HTTPS certificate blocker is resolved. Application implementation and
+off-host backups are still pending.
+
 ## Service behavior
 
 - HTTP redirects to HTTPS. Caddy manages certificates automatically for the
