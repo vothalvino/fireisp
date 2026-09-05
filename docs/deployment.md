@@ -179,6 +179,33 @@ Never commit passwords, SSH private keys, CSD certificates or keys, Finkok
 credentials, router credentials, or other external credentials. Add future
 secrets through a separately managed deployment mechanism.
 
+## Finkok demo credential preparation
+
+The staging VPS stores the supplied demo credentials in
+`/etc/fireisp/finkok-demo.json`, outside the deployment directory and repository.
+The directory is owned by root with mode `0700`; the file is owned by root with
+mode `0600`. Its JSON fields are `environment` (fixed to `demo`), `username`, and
+`token`. Inspect permissions with `stat`; do not print the file in terminal
+logs. The credentials are not mounted into Caddy or used by an application yet.
+
+Finkok token authentication uses the token's username and the token value in
+the service's password field. A read-only account check uses the demo
+registration endpoint, SOAP action `get`, and fields `reseller_username`,
+`reseller_password`, and a known demo issuer `taxpayer_id` (RFC):
+
+`https://demo-facturacion.finkok.com/servicios/soap/registration`
+
+The demo issuer RFC is still required to complete this check. The initial
+request without it returned HTTP 200 with `Failed, contact support.`; credential
+validity remains unconfirmed. HTTP success alone must not be interpreted as
+successful authentication. Require a matching issuer record in the response,
+and keep token and issuer data out of diagnostic output. No stamping,
+cancellation, issuer registration, or production request was performed.
+
+The application integration, demo issuer configuration, and test CSD remain
+future work. Load these credentials only into the fiscal service when that
+module is implemented, with a separate credential set for any production use.
+
 ## Official references
 
 - [Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
@@ -186,3 +213,5 @@ secrets through a separately managed deployment mechanism.
 - [Docker local logging driver](https://docs.docker.com/engine/logging/drivers/local/)
 - [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https)
 - [Caddy global options](https://caddyserver.com/docs/caddyfile/options)
+- [Finkok token authentication](https://wiki.finkok.com/en/home/token)
+- [Finkok read-only issuer lookup](https://wiki.finkok.com/home/webservices/registro_de_clientes/get)
