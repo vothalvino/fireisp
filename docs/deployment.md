@@ -23,6 +23,11 @@ page returns the intentional maintenance status 503 with `Retry-After: 300`.
 The HTTPS certificate blocker is resolved. Application implementation and
 off-host backups are still pending.
 
+The CHR has been inspected without configuration changes. WireGuard tools are
+installed on the VPS, but no tunnel is configured or active. Further router
+and private-network provisioning belongs in the application's
+[onboarding workflow](onboarding.md).
+
 ## Service behavior
 
 - HTTP redirects to HTTPS. Caddy manages certificates automatically for the

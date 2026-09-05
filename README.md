@@ -12,6 +12,9 @@ application is not implemented yet. The staging health endpoint reports
 See [deployment and recovery instructions](docs/deployment.md) for the Docker
 Compose configuration, HTTPS setup, validation, and operational boundaries.
 
+Repeatable ISP and router setup belongs in the software. See the
+[installer and onboarding requirements](docs/onboarding.md).
+
 ## Planned application
 
 - Python/Django with a Spanish interface and separate business modules.
