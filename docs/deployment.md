@@ -184,8 +184,8 @@ secrets through a separately managed deployment mechanism.
 The staging VPS stores the supplied demo credentials in
 `/etc/fireisp/finkok-demo.json`, outside the deployment directory and repository.
 The directory is owned by root with mode `0700`; the file is owned by root with
-mode `0600`. Its JSON fields are `environment` (fixed to `demo`), `username`, and
-`token`. Inspect permissions with `stat`; do not print the file in terminal
+mode `0600`. Its JSON fields are `environment` (fixed to `demo`), `username`,
+`token`, and `issuer_rfc`. Inspect permissions with `stat`; do not print the file in terminal
 logs. The credentials are not mounted into Caddy or used by an application yet.
 
 Finkok token authentication uses the token's username and the token value in
@@ -195,15 +195,15 @@ registration endpoint, SOAP action `get`, and fields `reseller_username`,
 
 `https://demo-facturacion.finkok.com/servicios/soap/registration`
 
-The demo issuer RFC is still required to complete this check. The initial
-request without it returned HTTP 200 with `Failed, contact support.`; credential
-validity remains unconfirmed. HTTP success alone must not be interpreted as
-successful authentication. Require a matching issuer record in the response,
-and keep token and issuer data out of diagnostic output. No stamping,
-cancellation, issuer registration, or production request was performed.
+The read-only check passed on 2026-09-05: Finkok returned the matching demo
+issuer with active status and no error message. HTTP success alone must not be
+interpreted as successful authentication; require a matching issuer record in
+the response, and keep token and issuer data out of diagnostic output. No
+stamping, cancellation, issuer registration, or production request was
+performed. Revalidate after changing the token or issuer configuration.
 
-The application integration, demo issuer configuration, and test CSD remain
-future work. Load these credentials only into the fiscal service when that
+The application integration and test CSD remain future work. Load these
+credentials only into the fiscal service when that
 module is implemented, with a separate credential set for any production use.
 
 ## Official references
