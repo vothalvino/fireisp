@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import close_old_connections
+from django.db import connections, close_old_connections
 from django.test import TestCase, TransactionTestCase, override_settings, skipUnlessDBFeature
 from django.urls import reverse
 from django.utils import timezone
@@ -187,7 +187,7 @@ class NetworkNodePostgresTests(TransactionTestCase):
                 errors.append(exc)
                 ready.set()
             finally:
-                close_old_connections()
+                connections.close_all()
         thread = Thread(target=owner)
         thread.start()
         try:
@@ -225,7 +225,7 @@ class NetworkNodePostgresTests(TransactionTestCase):
                 errors.append(exc)
                 entered.set()
             finally:
-                close_old_connections()
+                connections.close_all()
         with patch('network.services.probe_key', side_effect=probe):
             thread = Thread(target=owner)
             thread.start()

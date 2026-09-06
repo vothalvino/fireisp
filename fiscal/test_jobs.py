@@ -6,7 +6,7 @@ import uuid
 import requests
 from lxml import etree
 from django.core.exceptions import ValidationError
-from django.db import close_old_connections, transaction
+from django.db import connections, close_old_connections, transaction
 from django.test import TestCase, TransactionTestCase, skipUnlessDBFeature
 from django.urls import reverse
 from django.utils import timezone
@@ -292,7 +292,7 @@ class FiscalJobConcurrencyTests(TransactionTestCase):
                 barrier.wait(timeout=10)
                 return jobs.claim_job(job.pk) is not None
             finally:
-                close_old_connections()
+                connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             result = list(pool.map(lambda _: claim(), range(2)))
         self.assertEqual(sorted(result), [False, True])
@@ -309,7 +309,7 @@ class FiscalJobConcurrencyTests(TransactionTestCase):
                 barrier.wait(timeout=10)
                 return jobs.queue_job('verify', profile=self.profile).pk
             finally:
-                close_old_connections()
+                connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             result = list(pool.map(lambda _: enqueue(), range(2)))
         self.assertEqual(result[0], result[1])

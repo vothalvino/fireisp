@@ -3,7 +3,7 @@ from datetime import timedelta
 from threading import Barrier
 from unittest.mock import patch
 
-from django.db import close_old_connections, transaction
+from django.db import connections, close_old_connections, transaction
 from django.db.models.query import QuerySet
 from django.test import TestCase, TransactionTestCase, skipUnlessDBFeature
 from django.utils import timezone
@@ -24,7 +24,7 @@ def deliver_with_own_connection(barrier=None):
             barrier.wait(timeout=10)
         return deliver_outbox()
     finally:
-        close_old_connections()
+        connections.close_all()
 
 
 class OutboxCandidateTests(TestCase):
