@@ -3,7 +3,6 @@
 import os
 import re
 import signal
-import subprocess
 import time
 from pathlib import Path
 
@@ -101,6 +100,7 @@ os.chmod(BASE / 'sites-enabled' / 'fireisp', 0o640)
 import grp
 import pwd
 from accounting_replay import AccountingReplay
+from radius_daemon import replace_daemon
 accounting_dir = Path('/var/log/freeradius/fireisp-accounting')
 accounting_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 os.chown(accounting_dir, pwd.getpwnam('freerad').pw_uid, grp.getgrnam('freerad').gr_gid)
@@ -144,17 +144,12 @@ while not stopping:
         time.sleep(2)
         continue
     if generation != previous or (process and process.poll() is not None):
-        if process and process.poll() is None:
-            process.terminate()
-            process.wait(timeout=10)
-        process = None
-        if listeners.strip():
-            checked = subprocess.run(['freeradius', '-XC'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if checked.returncode:
-                print('RADIUS configuration validation failed; service remains unavailable.', flush=True)
-                time.sleep(5)
-                continue
-            process = subprocess.Popen(['freeradius', '-f', '-l', 'stdout'], stdout=None, stderr=None)
+        process, accepted = replace_daemon(process, bool(listeners.strip()))
+        if not accepted:
+            print('RADIUS configuration rejected; the existing daemon was preserved when available.', flush=True)
+            time.sleep(5)
+            continue
+        if process:
             print('FireISP RADIUS started on configured private WireGuard addresses.', flush=True)
         previous = generation
     time.sleep(2)

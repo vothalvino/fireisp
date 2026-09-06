@@ -320,6 +320,39 @@ class RestrictedAgentTests(TestCase):
         import eoip
         cls.agent, cls.eoip = agent, eoip
 
+    def test_invalid_radius_replacement_preserves_live_daemon(self):
+        from unittest.mock import Mock, patch
+        import radius_daemon
+        process = Mock()
+        for result in [Mock(returncode=1), radius_daemon.subprocess.TimeoutExpired('freeradius', 20)]:
+            with self.subTest(result=type(result).__name__), patch.object(radius_daemon.subprocess, 'run') as check, patch.object(radius_daemon.subprocess, 'Popen') as start:
+                if isinstance(result, Exception): check.side_effect = result
+                else: check.return_value = result
+                returned, accepted = radius_daemon.replace_daemon(process, True)
+                self.assertIs(returned, process)
+                self.assertFalse(accepted)
+                process.terminate.assert_not_called()
+                start.assert_not_called()
+
+    def test_radius_replacement_validates_before_stopping(self):
+        from unittest.mock import Mock, patch
+        import radius_daemon
+        events = []
+        process = Mock()
+        process.poll.return_value = None
+        process.terminate.side_effect = lambda: events.append('stop')
+        process.wait.side_effect = lambda **kwargs: events.append('wait')
+        def validate(*args, **kwargs):
+            events.append('validate')
+            return Mock(returncode=0)
+        def start(*args, **kwargs):
+            events.append('start')
+            return Mock()
+        with patch.object(radius_daemon.subprocess, 'run', side_effect=validate), patch.object(radius_daemon.subprocess, 'Popen', side_effect=start):
+            _, accepted = radius_daemon.replace_daemon(process, True)
+        self.assertTrue(accepted)
+        self.assertEqual(events, ['validate', 'stop', 'wait', 'start'])
+
     def test_allowlist_rejects_shell_and_paths(self):
         for request in [{'operation': 'shell', 'router_id': 1, 'command': 'id'}, {'operation': 'prepare', 'router_id': 1, 'path': '/etc/passwd'}, {'operation': 'remove', 'router_id': '../1'}, {'operation': 'prepare', 'router_id': True}]:
             with self.assertRaises(self.agent.Rejected):

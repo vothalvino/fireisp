@@ -49,7 +49,8 @@ configurado. El archivo de clientes contiene solo las IP /32 de los routers
 registrados. El daemon consulta autorización/contabilidad en Django con token
 compartido constante y devuelve las velocidades del plan actual. Los archivos
 se montan solo en agente/RADIUS; la web no accede a ellos. El proceso de entrada
-de RADIUS valida la configuración y reinicia únicamente su propio daemon
+de RADIUS valida la configuración antes de detener el daemon activo; si la
+validación falla o vence su plazo, conserva el proceso existente. Reinicia únicamente su propio daemon
 cuando cambia la generación. No se registran contraseñas ni se utiliza modo
 `-X` de depuración. En producción, proteja igualmente el tráfico interno REST
 con TLS o una red de contenedores privada cuando cruce un límite de confianza.
@@ -177,7 +178,7 @@ suspensión con desconexión RADIUS y rechazo de acceso nuevo, y reconexión con
 cola 5/20 Mbps. El trabajo `e5df0033-ea1c-41d1-a7b6-8ae0a2f55feb` autenticó
 otra sesión real durante una interrupción web de 12,87 segundos mediante la
 copia local y confirmó la recuperación automática posterior de Start/Stop.
-El cursor terminó sin bytes pendientes de confirmación. Las 32 pruebas del
+El cursor terminó sin bytes pendientes de confirmación. Las 34 pruebas del
 módulo pasaron, incluidas retención ante HTTP 503, redirecciones rechazadas,
 bloques parciales, sustitución del archivo, cursor durable, campos secretos
 excluidos y eventos duplicados/fuera de orden.

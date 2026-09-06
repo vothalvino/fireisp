@@ -6,7 +6,7 @@ traffic or production fiscal credentials were used.
 
 ## Automated checks
 
-Final suite: **136 tests passed on PostgreSQL on the VPS** (10.936 seconds).
+Final suite: **138 tests passed on PostgreSQL on the VPS** (10.740 seconds).
 The local suite passed with the two PostgreSQL-only cases skipped. Ruff and
 migration consistency checks passed. The complete installer was rerun on the
 VPS and finished only after trusted HTTPS application/database verification.
@@ -42,6 +42,7 @@ cache/broker configuration.
 | Fiscal variants | Real DEMO PUE, PPD, partial Pagos 2.0, related egreso, final payment with zero remaining balance, and two-ticket global invoice. |
 | Cancellation | Signed request returned 201 and acuse. SAT query returned `No Encontrado`; application correctly preserves `cancel_pending`, not final cancellation. |
 | CHR private link | Pinned SSH identity, WireGuard handshake and private ping; pre-existing router configuration preserved. |
+| RADIUS configuration replacement | Validation runs before stopping the working daemon. Rejected/timed-out replacements preserve it; ordering is covered by regression tests. A real configuration check succeeded while the prior daemon was running. |
 | Real PPPoE | Assigned IP, router session and gateway ping; Accounting Start/Stop; authenticated disconnect; suspension rejected new CHAP login; resume/reconnect succeeded. |
 | Plan speed policy | Observed upload/download queue limits 5/10 Mbps, then 5/20 Mbps after the controlled plan-change test. This is configuration readback, not a throughput measurement. |
 | Entitlement directory | A 20,000-entry serialized fixture (5,860,060 bytes) published successfully; exact 25,000-entry boundary accepted and 25,001 rejected while preserving the previous snapshot. This is not a concurrent AAA load test. |
