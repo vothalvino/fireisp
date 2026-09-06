@@ -6,7 +6,8 @@ traffic or production fiscal credentials were used.
 
 ## Automated checks
 
-Final suite: **138 tests passed on PostgreSQL on the VPS** (10.740 seconds).
+Current suite: **157 tests passed on PostgreSQL on the VPS** after the September 6
+HTTPS and login security fixes. The original pilot suite had 138 tests (10.740 seconds).
 The local suite passed with the two PostgreSQL-only cases skipped. Ruff and
 migration consistency checks passed. The complete installer was rerun on the
 VPS and finished only after trusted HTTPS application/database verification.
@@ -50,7 +51,7 @@ cache/broker configuration.
 | Accounting recovery | The durable journal automatically delivered the earlier outage's Start/Stop records after recovery. Replay confirmation is recorded separately from original event times; closed sessions stay closed. A later real PPP test also captured Accounting-Interim. |
 | Encrypted backup | Archive decrypted and every archived file hash verified; PostgreSQL restored in a disposable container without network/host mounts; exact snapshot counts matched. |
 | Off-host recovery copy | Ciphertext and checksum report copied and verified off the VPS; recovery identity stored separately in protected local storage. Recurring off-host replication is not configured. |
-| Source/dependencies | Secret scan found no committed-source secrets; dependency audit reported no known vulnerabilities after updating Paramiko to 5.0.0. |
+| Source/Python dependencies | Secret scan found no committed-source secrets; the Python dependency audit reported no known vulnerabilities after updating Paramiko to 5.0.0. This did not cover container OS packages or the Caddy binary. |
 
 The final encrypted restore drill used the 2026-09-06 01:47:48 UTC snapshot:
 16 files, 8 fictitious customers, 2 invoices, 2 payments, 68 audit records and

@@ -126,7 +126,10 @@ services:
       - radius_accounting:/var/log/freeradius
     mem_limit: 192m
   caddy:
-    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    image: fireisp-caddy:staging
+    build:
+      context: ${FIREISP_SOURCE_DIR:-../..}
+      dockerfile: deploy/staging/Dockerfile.caddy
     restart: unless-stopped
     environment:
       STAGING_HOSTNAME: ${STAGING_HOSTNAME:-demo2.opentrk.com.mx}

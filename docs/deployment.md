@@ -67,6 +67,15 @@ its ACME state in named volumes and renews certificates automatically.
 The Caddy administration endpoint is disabled. Validate changed configuration
 before recreating Caddy; `caddy reload` is not available here.
 
+Caddy is built from the pinned source and patched Go toolchain in
+`deploy/staging/Dockerfile.caddy`. The installer and CI inspect the compiled
+runtime before accepting it. See [HTTPS build provenance and updates](caddy-security.md).
+
+Login attempts use shared Valkey counters: at most 10 attempts per account and
+80 per source address in a fixed 15-minute window. Blocked requests never check
+passwords; a successful login resets the account counter. Restarting web workers
+does not clear these shared limits.
+
 ## Upgrades
 
 Take and verify a backup before applying an inspected release. Preserve the

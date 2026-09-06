@@ -1,0 +1,56 @@
+# Rebuild the existing Caddy release with the patched Go standard library.
+# Provenance and update procedure: docs/caddy-security.md.
+FROM golang:1.26.8-alpine@sha256:ce864e7223ac17b1775e6fd0b4c0db580c2eb50e7953a427916379e4b92a1628 AS builder
+
+ENV CGO_ENABLED=0 \
+    GOTOOLCHAIN=local \
+    GOMAXPROCS=2 \
+    GOPROXY=https://proxy.golang.org \
+    GOSUMDB=sum.golang.org
+
+WORKDIR /src
+RUN set -eux; \
+    test "$(go env GOVERSION)" = go1.26.8; \
+    wget -O /tmp/caddy.tar.gz https://codeload.github.com/caddyserver/caddy/tar.gz/e2eee6a7fce366321294c9c2a79f3146891dcbdf; \
+    echo 'a593bd7077c76102ca76d19287a5e247d4e359dd67eddbc933f865afd3c131eb  /tmp/caddy.tar.gz' | sha256sum -c -; \
+    tar -xzf /tmp/caddy.tar.gz --strip-components=1; \
+    rm /tmp/caddy.tar.gz; \
+    printf '%s\n' \
+      '2ce7537aecbdaf5b2fe42bf0cc42f2d7e7ce5e4186aab3586b736a53f5937abd  go.mod' \
+      'd4e2d1812e7e38d24f947adf93afddb9b04b2bc8102fefc3e5b43fc2540dea79  go.sum' \
+      > /tmp/caddy-modules.sha256; \
+    sha256sum -c /tmp/caddy-modules.sha256; \
+    go build -mod=readonly -p=2 -trimpath -buildvcs=false \
+      -ldflags='-s -w -X github.com/caddyserver/caddy/v2.CustomVersion=v2.11.4-fireisp1' \
+      -o /out/caddy ./cmd/caddy; \
+    go mod verify; \
+    sha256sum -c /tmp/caddy-modules.sha256; \
+    go version -m /out/caddy | grep -F 'go1.26.8'; \
+    /out/caddy version
+
+# Retain Caddy's runtime paths and command contract in a minimal runtime.
+# No old Caddy binary, compiler, package installation or curl enters this image.
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+COPY --from=builder /out/caddy /usr/bin/caddy
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /src/LICENSE /usr/share/licenses/caddy/LICENSE
+COPY deploy/staging/Caddyfile /etc/caddy/Caddyfile
+ENV XDG_CONFIG_HOME=/config \
+    XDG_DATA_HOME=/data \
+    CADDY_VERSION=v2.11.4-fireisp1
+RUN set -eux; \
+    mkdir -p /config/caddy /data/caddy /srv; \
+    chmod 700 /config/caddy /data/caddy; \
+    caddy build-info | grep -F 'go1.26.8'; \
+    caddy version
+
+LABEL org.opencontainers.image.version="v2.11.4-fireisp1" \
+      org.opencontainers.image.description="Caddy v2.11.4 rebuilt with Go 1.26.8 for FireISP" \
+      org.opencontainers.image.source="https://github.com/vothalvino/fireisp" \
+      io.fireisp.caddy.source-revision="e2eee6a7fce366321294c9c2a79f3146891dcbdf" \
+      io.fireisp.caddy.go-version="1.26.8" \
+      io.fireisp.caddy.security-fix="GO-2026-6090 / CVE-2026-56862"
+
+EXPOSE 80 443
+WORKDIR /srv
+CMD ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

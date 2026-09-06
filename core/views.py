@@ -20,23 +20,52 @@ from .models import ActivationToken, AuditEvent, Branch, Customer, Notification,
 from .security import staff_required
 from .services import audit, invite
 
+
+def reserve_login_attempt(key, limit):
+    """Reserve before checking a password; failed requests cannot race past the limit."""
+    for _ in range(3):
+        if cache.add(key, 1, timeout=900):
+            return True
+        try:
+            count = cache.incr(key)
+        except ValueError:
+            # The fixed window may expire between add() and incr().
+            continue
+        if count == 1:
+            # Redis may recreate a key if it expired during incr()'s existence check.
+            cache.touch(key, timeout=900)
+        return count <= limit
+    return False
+
+
 class LoginView(DjangoLoginView):
     template_name = 'registration/login.html'
     redirect_authenticated_user = True
     def post(self, request, *args, **kwargs):
-        raw = request.POST.get('username', '').strip().lower()
-        self.throttle_key = 'login:' + hashlib.sha256(raw.encode()).hexdigest()
+        raw = request.POST.get('username', '').strip()
+        user_model = get_user_model()
+        username_limit = user_model._meta.get_field(user_model.USERNAME_FIELD).max_length or 254
+        # Match AuthenticationForm's normalization and its oversized-input guard.
+        if len(raw) <= username_limit:
+            raw = user_model.normalize_username(raw)
+        self.throttle_key = 'login:' + hashlib.sha256(raw.lower().encode()).hexdigest()
         address = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', '')).split(',')[-1].strip()
         source_key = 'login-source:' + hashlib.sha256(address.encode()).hexdigest()
-        if cache.get(source_key, 0) >= 80:
-            return render(request, self.template_name, {'form': self.get_form(), 'rate_limited': True}, status=429)
-        cache.set(source_key, cache.get(source_key, 0) + 1, 900)
-        if cache.get(self.throttle_key, 0) >= 10:
-            return render(request, self.template_name, {'form': self.get_form(), 'rate_limited': True}, status=429)
+        if not reserve_login_attempt(source_key, 80) or not reserve_login_attempt(self.throttle_key, 10):
+            return self.rate_limited_response()
         return super().post(request, *args, **kwargs)
-    def form_invalid(self, form):
-        cache.set(self.throttle_key, cache.get(self.throttle_key, 0) + 1, 900)
-        return super().form_invalid(form)
+
+    def rate_limited_response(self):
+        # Rendering a bound AuthenticationForm calls full_clean() and authenticates.
+        # A blocked request must never evaluate (or reveal the validity of) a password.
+        kwargs = self.get_form_kwargs()
+        kwargs.pop('data', None)
+        kwargs.pop('files', None)
+        form = self.get_form_class()(**kwargs)
+        response = self.render_to_response(self.get_context_data(form=form, rate_limited=True), status=429)
+        response['Retry-After'] = '900'
+        return response
+
     def form_valid(self, form):
         cache.delete(self.throttle_key)
         result = super().form_valid(form)

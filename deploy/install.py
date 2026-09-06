@@ -126,7 +126,7 @@ def main():
     ipaddress.IPv4Address(options.public_ip)
     if not supported_ubuntu(Path('/etc/os-release').read_text()): parser.error('This installer supports Ubuntu 24.04 only.')
     options.source = options.source.resolve()
-    for name in ('Dockerfile', 'deploy/backup.py', 'deploy/staging/compose.yaml', 'deploy/staging/Caddyfile', 'deploy/staging/postgres-init.sh', 'deploy/fireisp-backup.service', 'deploy/fireisp-backup.timer'):
+    for name in ('Dockerfile', 'deploy/backup.py', 'deploy/check_caddy.py', 'deploy/staging/Dockerfile.caddy', 'deploy/staging/compose.yaml', 'deploy/staging/Caddyfile', 'deploy/staging/postgres-init.sh', 'deploy/fireisp-backup.service', 'deploy/fireisp-backup.timer'):
         if not (options.source / name).is_file(): parser.error('The source checkout is incomplete.')
     if shutil.disk_usage('/').free < 5 * 1024**3: parser.error('At least 5 GiB of free storage is required.')
     try:
@@ -180,6 +180,8 @@ def main():
     compose = ['docker', 'compose', '--project-directory', str(staging), '-f', str(staging / 'compose.yaml')]
     run(*compose, 'config', '--quiet')
     run(*compose, 'build', '--pull')
+    caddy_build = subprocess.check_output(compose + ['run', '--rm', '--no-deps', 'caddy', 'caddy', 'build-info'], text=True)
+    run(sys.executable, str(options.source / 'deploy/check_caddy.py'), input=caddy_build, text=True)
     run(*compose, 'run', '--rm', '--no-deps', 'caddy', 'caddy', 'validate', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile')
     run(*compose, 'up', '-d', 'db', 'redis')
     for attempt in range(45):

@@ -3,6 +3,16 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
+  caddy-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker build --tag fireisp-caddy:ci --file deploy/staging/Dockerfile.caddy .
+      - name: Verify the compiled TLS runtime
+        shell: bash
+        run: docker run --rm fireisp-caddy:ci caddy build-info | python3 deploy/check_caddy.py
+      - name: Validate the deployed HTTPS configuration
+        run: docker run --rm --env STAGING_HOSTNAME=security-check.invalid --volume "$PWD/deploy/staging/Caddyfile:/etc/caddy/Caddyfile:ro" fireisp-caddy:ci caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
   tests:
     runs-on: ubuntu-latest
     services:
