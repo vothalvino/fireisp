@@ -1,4 +1,8 @@
 from pathlib import Path
+import json
+import os
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from unittest import skipUnless
 from unittest.mock import Mock, patch
@@ -66,6 +70,21 @@ class RuntimeTests(TestCase):
 
 
 class RoleConfigurationTests(SimpleTestCase):
+    def test_fresh_web_process_uses_configured_broker_for_shared_tasks(self):
+        # Existing test imports initialize Celery; a fresh web process must do so too.
+        program = '''import django, json
+django.setup()
+from fiscal.tasks import process_fiscal_job
+print(json.dumps({'app': process_fiscal_job.app.main,
+                  'broker': process_fiscal_job.app.conf.broker_url}))
+'''
+        environment = {**os.environ, 'DJANGO_SETTINGS_MODULE': 'fireisp.settings',
+                       'DEBUG': 'true', 'REDIS_URL': 'redis://127.0.0.1:16379/9'}
+        result = subprocess.run([sys.executable, '-c', program], env=environment,
+                                capture_output=True, text=True, check=True, timeout=20)
+        self.assertEqual(json.loads(result.stdout),
+                         {'app': 'fireisp', 'broker': environment['REDIS_URL']})
+
     def test_heavy_work_is_routed_to_its_own_queue(self):
         for name, expected in [('core.tasks.deliver_outbox', 'core'),
                                ('billing.tasks.renewal_preview', 'billing'),
