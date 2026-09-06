@@ -22,6 +22,12 @@ __pycache__/
 .ruff_cache/
 *.sqlite3
 *.log
+private_documents/
+staticfiles/
+.coverage
+htmlcov/
+test-results/
+.backups/
 
 # Workstation files
 .DS_Store

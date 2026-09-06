@@ -1,0 +1,11 @@
+[Unit]
+Description=Encrypted FireISP database and document backup
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /etc/fireisp/backup.py create --keep-latest 96 --daily-days 30
+User=root
+UMask=0077
+Nice=10
+IOSchedulingClass=idle

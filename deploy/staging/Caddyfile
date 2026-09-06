@@ -11,20 +11,10 @@
 		X-Robots-Tag "noindex, nofollow"
 	}
 
-	@health {
-		method GET
-		path /healthz
+	@internal path /network/radius/*
+	respond @internal 404
+	request_body {
+		max_size 5MB
 	}
-	handle @health {
-		header Content-Type "application/json"
-		respond `{"environment":"staging","application_ready":false,"infrastructure_ready":true}` 200
-	}
-
-	handle {
-		header {
-			Content-Type "text/plain; charset=utf-8"
-			Retry-After "300"
-		}
-		respond "FireISP: entorno de pruebas en preparación." 503
-	}
+	reverse_proxy web:8000
 }

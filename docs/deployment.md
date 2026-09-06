@@ -1,236 +1,142 @@
-# FireISP staging infrastructure
+# Installation, upgrades and recovery
 
-The target is `demo2.opentrk.com.mx`, an Ubuntu 24.04 VPS with 4 vCPUs,
-approximately 3.7 GiB RAM, and 116 GB disk. Deployment files live on the server
-at `/opt/fireisp/staging`.
+## Architecture
 
-This deployment provides infrastructure only: Caddy, automatic HTTPS, a
-maintenance response, and an infrastructure health endpoint. Django, customer
-data, Finkok integration, and router integration are not installed. A successful
-health check does not mean the FireISP application exists or is ready.
+The staging application runs at `https://demo2.opentrk.com.mx` on Ubuntu 24.04,
+4 vCPUs and approximately 3.7 GiB RAM. The inspected source is in
+`/opt/fireisp/app`; Compose configuration is in `/opt/fireisp/staging`.
 
-## Verified staging status
+Caddy terminates HTTPS. Django/Gunicorn serves the application; PostgreSQL 17
+stores business state. Valkey and Celery deliver durable outbox events and
+scheduled work. A separate network worker calls a restricted Unix-socket agent.
+FreeRADIUS authenticates subscribers on private tunnel addresses. Application
+containers have memory limits; the web process is unprivileged, read-only,
+and has neither the Docker socket nor the provisioning-agent socket.
 
-Public HTTPS was verified on 2026-09-05 after inbound TCP ports 80 and 443
-were opened in the provider firewall. The certificate chain and hostname
-validated successfully using the client's normal trust store, with TLS 1.3
-and a Let's Encrypt certificate. Caddy manages renewal using its persistent
-data volume.
+Only HTTP/HTTPS are publicly published by Compose. The application callback
+port is bound to `127.0.0.1:18000`; PostgreSQL and Valkey have no published port.
+Caddy rejects public `/network/radius/` requests. RADIUS listeners and allowed
+NAS addresses are managed by the network module. Provider firewall rules are
+external prerequisites when no provider API is connected.
 
-External checks passed: HTTP redirects to HTTPS with status 308;
-`GET /healthz` returns status 200 and `application_ready: false`; the root
-page returns the intentional maintenance status 503 with `Retry-After: 300`.
-The HTTPS certificate blocker is resolved. Application implementation and
-off-host backups are still pending.
+## Fresh installation
 
-The CHR has been inspected without configuration changes. WireGuard tools are
-installed on the VPS, but no tunnel is configured or active. Further router
-and private-network provisioning belongs in the application's
-[onboarding workflow](onboarding.md).
+Prepare Ubuntu 24.04 with working SSH access, DNS pointing at its public IPv4,
+outbound HTTPS and inbound TCP 80/443. Any AAAA record must also reach this host.
+Keep SSH access available. The installer supports this OS version and checks
+for at least 5 GiB of free space. The tested sizing is four vCPUs and 4 GiB RAM. Before changing the host, the
+installer verifies the hostname resolves to the supplied IPv4 and reports any
+observed conflicting AAAA records. Completion requires verified public HTTPS
+and both application/database readiness flags.
 
-## Service behavior
-
-- HTTP redirects to HTTPS. Caddy manages certificates automatically for the
-  configured hostname.
-- `GET https://demo2.opentrk.com.mx/healthz` returns HTTP 200 and
-  `{"environment":"staging","application_ready":false,"infrastructure_ready":true}`.
-- Other HTTPS requests, including `/`, return HTTP 503 and
-  `FireISP: entorno de pruebas en preparación.`, with `Retry-After: 300`.
-- Health and maintenance responses include `Cache-Control: no-store` and
-  `X-Robots-Tag: noindex, nofollow`. The health response has no `Retry-After`.
-- Only TCP ports 80 and 443 are published by Compose, on all host interfaces.
-  HTTP/1.1 and HTTP/2 are enabled; HTTP/3 and UDP publishing are disabled.
-- The Caddy administration endpoint is disabled. Apply configuration changes by
-  recreating the container; `caddy reload` cannot work in this configuration.
-- Caddy is limited to 192 MiB RAM and 0.5 CPU, restarts unless manually stopped,
-  and uses Docker's `local` log driver with three 10 MB log files.
-
-## Prerequisites
-
-Install Docker Engine and the Docker Compose plugin from Docker's official
-Ubuntu repository. Configure SSH access separately. The operator needs sudo
-access, and the server needs working DNS and outbound HTTPS access for image
-downloads and certificate issuance. The hostname's A record, and any AAAA
-record, must point to this server. Allow inbound TCP 80 and 443 in both the
-provider firewall and host configuration; retain the configured SSH access.
-
-Docker port publishing can bypass UFW rules. Restrict future database and
-internal service ports to private container networks; do not publish them on
-public interfaces. If temporary host access is necessary, bind explicitly to
-loopback and use an SSH tunnel.
-
-`STAGING_HOSTNAME` defaults to `demo2.opentrk.com.mx` in Compose. To override it,
-create `/opt/fireisp/staging/.env` on the server with a line such as
-`STAGING_HOSTNAME=staging.example.com`, and configure that hostname's DNS first.
-Keep this file outside version control.
-
-## Initial deployment
-
-Run these commands from the repository root on your workstation. Set
-`STAGING_SSH_TARGET` to the SSH alias or user/hostname already configured by the
-operator; SSH credentials and private key locations are not stored here.
+Clone an inspected release into `/opt/fireisp/app`, then run:
 
 ```bash
-STAGING_SSH_TARGET='your-configured-ssh-alias'
-ssh "$STAGING_SSH_TARGET" 'mkdir -p ~/fireisp-staging-upload'
-scp deploy/staging/compose.yaml deploy/staging/Caddyfile \
-  "$STAGING_SSH_TARGET:fireisp-staging-upload/"
-ssh "$STAGING_SSH_TARGET"
+sudo python3 /opt/fireisp/app/deploy/install.py --hostname isp.example.com --public-ip 203.0.113.10 --demo-data
 ```
 
-On the server:
+Replace the example values. The installer installs Docker Engine/Compose from
+Docker's Ubuntu repository when needed, installs `age`, prepares PPP devices,
+generates secrets, validates Compose and Caddy, builds containers, migrates the
+database and initializes the organization, roles and administrator invitation.
+Reruns preserve generated secrets and update hostname/source configuration.
+`--demo-data` is optional and idempotent.
 
-```bash
-sudo install -d -m 0755 /opt/fireisp/staging
-sudo install -m 0644 ~/fireisp-staging-upload/compose.yaml /opt/fireisp/staging/compose.yaml
-sudo install -m 0644 ~/fireisp-staging-upload/Caddyfile /opt/fireisp/staging/Caddyfile
-cd /opt/fireisp/staging
-sudo docker compose config --quiet
-sudo docker compose pull
-sudo docker compose run --rm --no-deps caddy \
-  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-sudo docker compose up -d
-```
+The administrator invitation is root-only at `/etc/fireisp/first-login.txt`,
+expires after 24 hours and is usable once. The administrator sets their own
+password. Never publish this file or commit it. If it expires, explicitly renew
+the invitation through `manage.py bootstrap --renew-invitation`, using the same
+protected bind mount as the installer.
 
-The official image is pinned to a reviewed digest in `compose.yaml` for
-reproducible deployments, using `caddy:2-alpine@sha256:...`. For an upgrade,
-obtain the next digest from the image actually pulled; do not invent or reuse
-an unverified digest:
-
-```bash
-sudo docker image inspect caddy:2-alpine --format '{{json .RepoDigests}}'
-```
-
-Certificate issuance may take a short time after the first start. The named
-volumes `fireisp-staging_caddy_data` and `fireisp-staging_caddy_config` preserve
-certificate material and Caddy state across container replacement.
-
-## Validation
-
-On the server:
+## Operating the application
 
 ```bash
 cd /opt/fireisp/staging
 sudo docker compose ps
-sudo docker compose logs --tail=100 caddy
-sudo docker compose exec caddy caddy version
-sudo ss -lntup
+sudo docker compose exec -T web python manage.py diagnose
+curl --fail --silent --show-error https://demo2.opentrk.com.mx/healthz
 ```
 
-From the workstation, check public DNS, TLS, HTTP redirection, and both response
-types. Substitute the hostname if it was overridden:
+`/healthz` reports application/database availability, not legal, fiscal or
+subscriber readiness. Sign in and open **Ajustes → Estado del sistema** for
+integration results, backup freshness and worker failures. The application
+keeps the environment visibly marked as demonstration. Public HTTP redirects
+to HTTPS; certificate validation uses the normal trust store. Caddy retains
+its ACME state in named volumes and renews certificates automatically.
+
+The Caddy administration endpoint is disabled. Validate changed configuration
+before recreating Caddy; `caddy reload` is not available here.
+
+## Upgrades
+
+Take and verify a backup before applying an inspected release. Preserve the
+previous source revision and image digest. Run the installer against the new
+checkout to rebuild and migrate; it does not reset application or router state.
+Reruns may briefly interrupt management requests. Schedule router provisioning
+outside that window.
+
+Schema downgrades are not automatic. If a migration is incompatible with the
+previous release, recover into a separate instance from the verified pre-upgrade
+backup and switch traffic only after checking it. Do not remove named volumes
+or use `docker compose down -v` for an upgrade.
+
+## Backups and verification
+
+`fireisp-backup.timer` runs every 15 minutes. The installed script is
+`/etc/fireisp/backup.py`; encrypted archives and their non-secret reports are in
+`/var/backups/fireisp`. The first run creates a root-only age recovery identity
+at `/etc/fireisp/backup.agekey`. Keep a separate off-host copy of this identity.
+The encrypted archive includes the deployment environment, PostgreSQL dump,
+private documents, network state, RADIUS configuration and accounting journal.
 
 ```bash
-curl --silent --show-error --head http://demo2.opentrk.com.mx/
-curl --silent --show-error --include https://demo2.opentrk.com.mx/
-curl --fail --silent --show-error --include https://demo2.opentrk.com.mx/healthz
+sudo python3 /etc/fireisp/backup.py create-and-verify
+sudo python3 /etc/fireisp/backup.py verify --file /var/backups/fireisp/fireisp-TIMESTAMP.tar.age
+sudo systemctl status fireisp-backup.timer
 ```
 
-Expect an HTTPS redirect from HTTP, a 503 maintenance response with
-`Retry-After: 300` at `/`, and 200 JSON with `application_ready: false` at
-`/healthz`. Inspect the cache and robots headers on the HTTPS responses. Do not
-use curl's `--fail` for the maintenance request: HTTP 503 is intentional. Do not
-use `--insecure`; a trusted certificate is part of this validation.
+Verification decrypts into a private temporary directory, validates the archive
+allowlist and every file hash, then restores PostgreSQL into a disposable
+container with **no network, published ports or host mounts**. Expected counts
+come from the same exported database snapshot as the dump. The test compares
+customers, invoices, payments, audit events and migrations and removes only its
+own labeled container. It never restores over the running database.
 
-## Updates and recovery
+Retention keeps 96 recent points plus one per day for 30 days; only owned,
+checksum-verified archive/report pairs are eligible for deletion. This is a
+recovery policy, not legal erasure of every historical copy. A 15-minute timer
+is a schedule, not a guarantee of recovery point or recovery time.
 
-Before copying an update into `/opt/fireisp/staging`, preserve the current
-deployment files on the server:
+A verified off-host copy is part of staging acceptance. Continuous off-host
+replication needs an operator-controlled destination and retention policy; the
+installer does not silently create an external storage account.
 
-```bash
-cd /opt/fireisp/staging
-sudo cp -p compose.yaml compose.yaml.previous
-sudo cp -p Caddyfile Caddyfile.previous
-```
+## Recovery after loss of a server
 
-Upload the revised files using the initial deployment's `scp` command, install
-them into `/opt/fireisp/staging`, then apply them:
+1. Obtain a verified encrypted archive, its checksum report and the separately
+   stored age identity. Verify ciphertext integrity before decryption.
+2. Prepare an isolated replacement Ubuntu host and the matching source release.
+   Decrypt into a root-only directory and inspect `manifest.json`. Preserve the
+   archived `ENCRYPTION_KEY`; without it, database credentials for integrations
+   cannot be decrypted.
+3. Run the isolated verification command first. Restore the environment,
+   database dump and named volume contents to the replacement deployment while
+   its application/worker/RADIUS services remain stopped.
+4. Start PostgreSQL and restore with `pg_restore --exit-on-error`; restore file
+   ownership for documents and network volumes. Start application services and
+   run `diagnose`, an authenticated browser check and a private-link check.
+5. Reconcile any payments, PAC requests and network jobs made after the backup.
+   An uncertain fiscal request must be recovered against the PAC before retry.
+6. Switch DNS/network endpoints only after review. Do not run two provisioning
+   workers against the same router identity at once.
 
-```bash
-cd /opt/fireisp/staging
-sudo docker compose config --quiet
-sudo docker compose pull
-sudo docker compose run --rm --no-deps caddy \
-  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-sudo docker compose up -d --force-recreate caddy
-sudo docker compose logs --tail=100 caddy
-```
+The automated drill validates backup contents and database restoration. It
+does not claim an unattended, zero-downtime whole-server failover.
 
-Re-run the public validation commands. An image upgrade requires updating the
-pinned digest after reviewing and pulling the intended official image; pulling
-an existing digest does not upgrade it. Container recreation causes a short
-interruption because only one Caddy instance runs.
+## Private material
 
-If validation fails before recreation, restore the saved files and investigate
-without replacing the running container. If an applied update fails, restore
-the previous configuration and image reference:
-
-```bash
-cd /opt/fireisp/staging
-sudo cp -p compose.yaml.previous compose.yaml
-sudo cp -p Caddyfile.previous Caddyfile
-sudo docker compose config --quiet
-sudo docker compose run --rm --no-deps caddy \
-  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-sudo docker compose up -d --force-recreate caddy
-sudo docker compose logs --tail=100 caddy
-```
-
-For an unchanged configuration after a process failure, use
-`sudo docker compose restart caddy`, then repeat validation. For certificate
-problems, check DNS, clock synchronization, reachable TCP 80/443, and the Caddy
-logs before changing certificate state.
-
-If ACME validation reports a connection timeout while the workstation can
-reach the server, inspect the provider firewall as well as Ubuntu. Certificate
-authorities connect from other networks: TCP 80/443 must be publicly reachable,
-not limited to the workstation's source address. Confirm the challenge packets
-reach the host before changing working Docker forwarding rules. Do not bypass
-certificate verification to treat an incomplete HTTPS setup as successful.
-
-Preserve the named volumes. Do not run `docker compose down -v`, remove the
-Caddy volumes, or prune volumes as part of deployment or recovery. Certificates
-and private keys live in the data volume. Backups are not yet configured; the
-`.previous` files are a local rollback aid, not a backup. Configure and verify
-off-host backups before adding application state or customer data.
-
-Never commit passwords, SSH private keys, CSD certificates or keys, Finkok
-credentials, router credentials, or other external credentials. Add future
-secrets through a separately managed deployment mechanism.
-
-## Finkok demo credential preparation
-
-The staging VPS stores the supplied demo credentials in
-`/etc/fireisp/finkok-demo.json`, outside the deployment directory and repository.
-The directory is owned by root with mode `0700`; the file is owned by root with
-mode `0600`. Its JSON fields are `environment` (fixed to `demo`), `username`,
-`token`, and `issuer_rfc`. Inspect permissions with `stat`; do not print the file in terminal
-logs. The credentials are not mounted into Caddy or used by an application yet.
-
-Finkok token authentication uses the token's username and the token value in
-the service's password field. A read-only account check uses the demo
-registration endpoint, SOAP action `get`, and fields `reseller_username`,
-`reseller_password`, and a known demo issuer `taxpayer_id` (RFC):
-
-`https://demo-facturacion.finkok.com/servicios/soap/registration`
-
-The read-only check passed on 2026-09-05: Finkok returned the matching demo
-issuer with active status and no error message. HTTP success alone must not be
-interpreted as successful authentication; require a matching issuer record in
-the response, and keep token and issuer data out of diagnostic output. No
-stamping, cancellation, issuer registration, or production request was
-performed. Revalidate after changing the token or issuer configuration.
-
-The application integration and test CSD remain future work. Load these
-credentials only into the fiscal service when that
-module is implemented, with a separate credential set for any production use.
-
-## Official references
-
-- [Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
-- [Docker firewall behavior](https://docs.docker.com/engine/network/packet-filtering-firewalls/)
-- [Docker local logging driver](https://docs.docker.com/engine/logging/drivers/local/)
-- [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https)
-- [Caddy global options](https://caddyserver.com/docs/caddyfile/options)
-- [Finkok token authentication](https://wiki.finkok.com/en/home/token)
-- [Finkok read-only issuer lookup](https://wiki.finkok.com/home/webservices/registro_de_clientes/get)
+`/opt/fireisp/staging/.env` and `/etc/fireisp` are protected and excluded from
+Git. Finkok and router credentials are encrypted in application storage.
+The public repository contains no deployment password or private certificate.
+See [fiscal setup](fiscal.md) and [router onboarding](network.md) for the product
+workflows. Never print the environment or private JSON files in diagnostics.

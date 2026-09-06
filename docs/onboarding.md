@@ -6,17 +6,25 @@ recovery. They must not become a requirement for configuring each ISP or router.
 
 ## Installer responsibilities
 
-- Check the host operating system, available resources, DNS, and required ports.
+- Check Ubuntu 24.04, disk space, memory and hostname DNS before changing the
+  host. Require the A record to match the selected VPS and identify conflicting
+  AAAA records when observed.
 - Install and configure the application runtime, HTTPS, persistent storage, and
   a restricted provisioning worker where host-level changes are required.
 - Initialize the database and provide a secure first-administrator setup flow.
 - Support repeatable upgrades, backups, restore checks, and health diagnostics.
 - Explain the exact provider firewall changes when no provider API is connected;
   distinguish those external prerequisites from settings the installer controls.
+- Verify the deployed HTTPS `/healthz` endpoint with normal certificate and
+  hostname validation, bounded retries, and explicit application/database
+  readiness. A maintenance page or HTTP redirect does not complete installation.
 
-Docker and HTTPS on the current VPS are bootstrap infrastructure. Future
-installations must reproduce them through the installer rather than repeated
-manual commands.
+`deploy/install.py` now reproduces Docker, the application stack, HTTPS,
+database migrations, initial account setup and scheduled encrypted backups.
+Reruns preserve authentication secrets and update the inspected source and
+public hostname settings. Provider DNS/firewall changes remain external
+prerequisites; an HTTPS check originating on the VPS does not establish
+reachability from every outside network.
 
 ## Admin onboarding responsibilities
 
@@ -66,18 +74,21 @@ route to connect it to FireISP.
 - Finkok credential validation is separate from successful demo fiscal-document
   issuance/cancellation and never enables production operations implicitly.
 
-## Current lab state (2026-09-05)
+## Current implementation and lab verification
 
-The CHR was inspected read-only. It runs RouterOS 7.21.5, has no active PPP
-sessions, and already contains an older test tunnel and RADIUS configuration.
-Those settings were not changed. The supplied account is in the `write` group;
-the software must discover its capabilities rather than assume administrator
-permissions.
+The application now provides router registration, pinned SSH identity,
+discovery, reviewed provisioning jobs, a private WireGuard/EoIP lab path and
+real temporary PPPoE session tests. These are application workflows, not
+manual commands required for every router. Existing unrelated resources are
+preserved, and rollback operates on the recorded resources owned by FireISP.
 
-The VPS can reach the CHR's SSH port after the provider firewall adjustment.
-WireGuard tools were installed on the VPS, but no tunnel was configured or
-activated. Unused keys generated during preparation were removed. Router
-onboarding and private-link provisioning remain application work.
+Consult the [network module and its limits](network.md) and the
+[current verification record](testing.md) for the latest measured results.
+The application also retains each provisioning job and its observed evidence.
+Successful SSH access, a tunnel, a configured speed queue, actual throughput
+and Internet reachability are different checks; the interface must preserve
+those distinctions. The isolated lab does not authorize migrating existing
+production subscriber interfaces.
 
 ## Technical references
 

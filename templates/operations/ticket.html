@@ -1,0 +1,5 @@
+{% extends 'base.html' %}{% block title %}{{ ticket.folio }}{% endblock %}{% block content %}
+<a href="{% url 'operations:index' %}">← Operaciones</a><h1>{{ ticket.folio }} · {{ ticket.subject }}</h1>
+<div class="card"><p>{{ ticket.customer }} · {{ ticket.get_kind_display }} · {{ ticket.get_status_display }}</p><p>{{ ticket.description|linebreaksbr }}</p><p>Canal: {{ ticket.channel }} · Resolver antes del {{ ticket.due_at }}</p>{% if ticket.kind == 'billing' and ticket.status != 'resolved' %}<p class="notice">La aclaración de facturación impide suspender el servicio mientras siga sin resolución.</p>{% endif %}</div>
+{% if ticket.status != 'resolved' %}<div class="card"><h2>Registrar resolución</h2><form method="post">{% csrf_token %}{{ form.as_p }}<button type="submit">Resolver ticket</button></form></div>{% else %}<div class="card"><h2>Resolución</h2><p>{{ ticket.resolution|linebreaksbr }}</p><p>{{ ticket.resolved_at }}</p></div>{% endif %}
+{% endblock %}

@@ -1,0 +1,23 @@
+[project]
+name = "fireisp"
+version = "0.1.0"
+description = "Modular management for a Mexican fixed wireless ISP"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+dependencies = [
+  "Django==5.2.17", "psycopg[binary]==3.3.5", "gunicorn==23.0.0",
+  "whitenoise==6.12.0", "cryptography==50.0.1", "paramiko==5.0.0",
+  "httpx==0.28.1", "defusedxml==0.7.1", "satcfdi==26.7.2",
+  "python-dateutil==2.9.0.post0", "celery==5.6.3", "redis==6.4.0",
+  "dj-database-url==3.1.2",
+]
+[dependency-groups]
+dev = ["pytest-django==4.14.0", "ruff==0.16.6", "coverage==7.16.0"]
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "fireisp.settings"
+python_files = ["tests.py", "test_*.py"]
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+[tool.ruff.lint]
+select = ["F", "E9"]

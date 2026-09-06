@@ -1,0 +1,36 @@
+{% load static %}<!doctype html>
+<html lang="es-MX"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><title>{% block title %}FireISP{% endblock %}</title><link rel="stylesheet" href="{% static 'app.css' %}"><link rel="icon" type="image/svg+xml" href="{% static 'favicon.svg' %}"><script src="{% static 'app.js' %}" defer></script></head>
+<body>
+<a class="skip-link" href="#main">Saltar al contenido</a>
+{% if user.is_authenticated %}
+<aside class="sidebar">
+ <a class="brand" href="{% if user.is_staff %}/{% else %}/portal/{% endif %}"><span class="brand-symbol">f<span>i</span></span><span>fire<span class="brand-light">isp</span></span></a>
+ <div class="workspace-label">{% if user.is_staff %}ESPACIO DE TRABAJO{% else %}MI CUENTA{% endif %}</div>
+ <nav aria-label="Navegación principal">
+ {% if user.is_staff %}
+ <a href="/" {% if request.path == '/' %}aria-current="page"{% endif %}><span class="nav-icon">◫</span>Resumen</a>
+ <a href="/customers/" {% if '/customers/' in request.path %}aria-current="page"{% endif %}><span class="nav-icon">◎</span>Clientes</a>
+ <a href="/plans/" {% if '/plans/' in request.path %}aria-current="page"{% endif %}><span class="nav-icon">▤</span>Planes de internet</a>
+ <a href="/billing/" {% if '/billing/' in request.path %}aria-current="page"{% endif %}><span class="nav-icon">$</span>Cobranza</a>
+ <a href="/fiscal/" {% if '/fiscal/' in request.path %}aria-current="page"{% endif %}><span class="nav-icon">▧</span>Facturación SAT</a>
+ <a href="/network/" {% if '/network/' in request.path %}aria-current="page"{% endif %}><span class="nav-icon">⌁</span>Red y acceso</a>
+ <a href="/operations/" {% if '/operations/' in request.path %}aria-current="page"{% endif %}><span class="nav-icon">◇</span>Operaciones</a>
+ <a href="/compliance/" {% if '/compliance/' in request.path %}aria-current="page"{% endif %}><span class="nav-icon">✓</span>Cumplimiento</a>
+ <div class="nav-divider"></div>
+ <a href="/audit/" {% if '/audit/' in request.path %}aria-current="page"{% endif %}><span class="nav-icon">≡</span>Bitácora</a>
+ <a href="/settings/" {% if '/settings/' in request.path %}aria-current="page"{% endif %}><span class="nav-icon">⚙</span>Configuración</a>
+ {% else %}
+ <a href="/portal/" aria-current="page"><span class="nav-icon">◫</span>Mi servicio</a>
+ {% endif %}
+ </nav>
+ <div class="sidebar-foot"><span class="status-dot"></span>Cuauhtémoc, Chihuahua<br><small>FireISP {{ app_version }}</small></div>
+</aside>
+<div class="workspace">
+ <header class="topbar"><div class="org-name">{{ organization.name|default:'FireISP' }} <span class="divider">/</span> {% if organization.demo_mode %}<span class="badge amber">Demostración</span>{% else %}<span class="badge">Operación</span>{% endif %}</div><div class="account"><a href="/account/password/">{{ user.first_name|default:user.username }}</a><form action="/logout/" method="post">{% csrf_token %}<button class="link-button" type="submit">Salir ↗</button></form></div></header>
+{% endif %}
+<main id="main" class="{% if user.is_authenticated %}main{% else %}auth-main{% endif %}">
+ {% if messages %}<div class="messages" aria-live="polite">{% for message in messages %}<div class="notice {{ message.tags }}">{{ message }}</div>{% endfor %}</div>{% endif %}
+ {% block content %}{% endblock %}
+</main>
+{% if user.is_authenticated %}<footer class="footer"><span>Hecho para conectar tu comunidad.</span><span>MXN · America/Chihuahua</span></footer></div>{% endif %}
+</body></html>

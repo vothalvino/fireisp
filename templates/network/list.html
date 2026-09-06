@@ -1,0 +1,5 @@
+{% extends 'base.html' %}{% block title %}Red y routers{% endblock %}{% block content %}
+<div class="page-header"><div><h1>Red y routers</h1><p>Conexiones privadas, acceso PPPoE y resultados verificados.</p></div><a class="button" href="{% url 'network:create' %}">Agregar router</a></div>
+<p><a href="{% url 'network:access' %}">Administrar acceso de abonados</a></p><table><thead><tr><th>Router</th><th>Administración</th><th>Entorno</th><th>Estado</th></tr></thead><tbody>{% for router in routers %}<tr><td><a href="{% url 'network:detail' router.pk %}">{{ router.name }}</a></td><td>{{ router.management_host }}</td><td>{% if router.is_lab %}Laboratorio{% else %}Producción{% endif %}</td><td>{% if router.readiness.end_to_end %}Prueba PPPoE completa{% elif router.provisioned_at %}Configurado; verificación pendiente{% elif router.discovered_at %}Descubierto{% else %}Onboarding pendiente{% endif %}</td></tr>{% empty %}<tr><td colspan="4">Agregue el primer router para descubrir su configuración y preparar un plan revisable.</td></tr>{% endfor %}</tbody></table>
+<h2>Trabajos recientes</h2>{% include 'network/jobs.html' %}
+{% endblock %}

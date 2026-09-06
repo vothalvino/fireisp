@@ -1,6 +1,130 @@
 name: fireisp-staging
 
 services:
+  db:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run the installer to generate secrets}
+      FIREISP_DB_PASSWORD: ${FIREISP_DB_PASSWORD:?Run the installer to generate secrets}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init.sh:/docker-entrypoint-initdb.d/10-fireisp.sh:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U fireisp -d fireisp"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    mem_limit: 900m
+    shm_size: 128m
+    command: [postgres, -c, shared_buffers=256MB, -c, max_connections=80]
+  redis:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: [valkey-server, --appendonly, 'yes', --maxmemory, 96mb, --maxmemory-policy, noeviction]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [CMD, valkey-cli, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    mem_limit: 160m
+  web:
+    image: fireisp:staging
+    build:
+      context: ${FIREISP_SOURCE_DIR:-../..}
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - '127.0.0.1:18000:8000'
+    volumes:
+      - documents:/data/documents
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/healthz',headers={'Host':os.environ['ALLOWED_HOSTS'].split(',')[0],'X-Forwarded-Proto':'https'}); urllib.request.urlopen(r,timeout=5)"]
+      interval: 15s
+      timeout: 7s
+      retries: 5
+      start_period: 30s
+    mem_limit: 650m
+    read_only: true
+    tmpfs: [/tmp:size=64m, /home/fireisp/.cache:size=64m]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  worker:
+    image: fireisp:staging
+    restart: unless-stopped
+    env_file: .env
+    command: [celery, -A, fireisp.celery, worker, --concurrency=1, --loglevel=warning]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - documents:/data/documents
+    mem_limit: 350m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  beat:
+    image: fireisp:staging
+    restart: unless-stopped
+    env_file: .env
+    command: [celery, -A, fireisp.celery, beat, --schedule=/tmp/celerybeat-schedule, --loglevel=warning]
+    depends_on:
+      redis: {condition: service_healthy}
+    mem_limit: 160m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  network-worker:
+    image: fireisp:staging
+    restart: unless-stopped
+    env_file: .env
+    command: [python, manage.py, run_network_jobs]
+    depends_on:
+      db: {condition: service_healthy}
+    volumes:
+      - network_socket:/run/fireisp-network
+    mem_limit: 250m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  network-agent:
+    build:
+      context: ${FIREISP_SOURCE_DIR:-../..}
+      dockerfile: deploy/network/Dockerfile.agent
+    image: fireisp-network-agent:staging
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      NETWORK_WORKER_UIDS: '1000'
+      NETWORK_WORKER_GID: '1000'
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_RAW, CHOWN, DAC_OVERRIDE, SETUID, SETGID]
+    devices: [/dev/net/tun:/dev/net/tun, /dev/ppp:/dev/ppp]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - network_socket:/run/fireisp-network
+      - network_state:/var/lib/fireisp-network
+      - radius_config:/var/lib/fireisp-radius
+    mem_limit: 192m
+  radius:
+    build:
+      context: ${FIREISP_SOURCE_DIR:-../..}
+      dockerfile: deploy/network/Dockerfile.radius
+    image: fireisp-radius:staging
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      NETWORK_RADIUS_TOKEN: ${NETWORK_RADIUS_TOKEN:?Run the installer to generate secrets}
+      NETWORK_RADIUS_URL: http://127.0.0.1:18000/network/radius
+    volumes:
+      - radius_config:/var/lib/fireisp-radius:ro
+      - radius_accounting:/var/log/freeradius
+    mem_limit: 192m
   caddy:
     image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
@@ -15,6 +139,8 @@ services:
       - caddy_config:/config
     mem_limit: 192m
     cpus: 0.5
+    depends_on:
+      web: {condition: service_healthy}
     logging:
       driver: local
       options:
@@ -24,3 +150,10 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  postgres_data:
+  redis_data:
+  documents:
+  network_socket:
+  network_state:
+  radius_config:
+  radius_accounting:
