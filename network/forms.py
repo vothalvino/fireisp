@@ -8,7 +8,7 @@ class RouterForm(forms.ModelForm):
 
     class Meta:
         model = Router
-        fields = ['organization', 'name', 'management_host', 'ssh_port', 'username', 'password', 'is_lab']
+        fields = ['organization', 'name', 'network_node', 'management_host', 'ssh_port', 'username', 'password', 'is_lab']
 
     def save(self, commit=True):
         router = super().save(commit=False)

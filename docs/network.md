@@ -31,23 +31,36 @@ network namespace del host, capacidades NET_ADMIN/NET_RAW, `/dev/net/tun`,
 `/run/fireisp-network` y volumen de configuración `/var/lib/fireisp-radius`.
 No requiere socket Docker, modo privileged ni acceso al filesystem del host.
 Configure `NETWORK_WORKER_UIDS=1000`, `NETWORK_WORKER_GID=1000` con el UID/GID
-real del worker. Mantenga una sola instancia del worker. Los trabajos
-interrumpidos se recuperan explícitamente con `--recover-stale` tras comprobar
-que no existe otro proceso ejecutándolos.
+real del worker. La instalación inicial usa el nodo `primary` en el mismo servidor.
+Cada nodo tiene un único ejecutor activo: PostgreSQL serializa procesos del mismo
+nodo y nodos diferentes trabajan en paralelo. Una reserva renovable y su generación
+impiden continuar después de perder la propiedad de ejecución. Los trabajos
+interrumpidos detienen su router hasta revisión y reintento explícito;
+`--recover-stale` ya no los devuelve automáticamente a pendientes.
+
+El selector de servidor al registrar un router permite asignarlo a otro nodo.
+Mover un router ya aprovisionado exige revisar y cambiar su endpoint y estado
+local; ese traslado no se automatiza. Consulte
+[ubicación de servidores de red](network-nodes.md) y
+[despliegue de funciones en otros servidores](distributed-deployment.md).
 
 Variables:
 
-- `NETWORK_PUBLIC_ENDPOINT`: IPv4 exterior del servidor.
+- `NETWORK_NODE_ID`: nodo registrado que atiende el worker; `primary` por defecto.
+- `NETWORK_PUBLIC_ENDPOINT`: IPv4 exterior del servidor principal heredado. Los
+  planes de otros nodos usan el endpoint registrado en `NetworkNode`.
 - `NETWORK_AGENT_SOCKET`: `/run/fireisp-network/agent.sock`.
-- `NETWORK_RADIUS_TOKEN`: valor aleatorio URL-safe de 32–128 caracteres,
-  compartido por Django y el contenedor RADIUS.
+- `NETWORK_RADIUS_TOKEN`: token del callback RADIUS. El token heredado solo
+  autoriza el nodo `primary`; cada nodo adicional registra un token exclusivo por
+  stdin y conserva el valor en su configuración privada. Django guarda el digest.
 - `NETWORK_RADIUS_URL`: URL interna de Django, por ejemplo
   `http://127.0.0.1:18000/network/radius` en el namespace del host.
 
 FreeRADIUS escucha únicamente en las direcciones privadas que el agente haya
 configurado. El archivo de clientes contiene solo las IP /32 de los routers
 registrados. El daemon consulta autorización/contabilidad en Django con token
-compartido constante y devuelve las velocidades del plan actual. Los archivos
+exclusivo del nodo y devuelve las velocidades del plan actual. La API rechaza
+NAS asignados a otro nodo aunque presenten ese token. Los archivos
 se montan solo en agente/RADIUS; la web no accede a ellos. El proceso de entrada
 de RADIUS valida la configuración antes de detener el daemon activo; si la
 validación falla o vence su plazo, conserva el proceso existente. Reinicia únicamente su propio daemon
@@ -130,7 +143,9 @@ nuevo. Un trabajo de suspensión pendiente se descarta si el estado ya cambió.
 ## Autorización durante una caída de la aplicación
 
 Cada diez segundos el worker publica un archivo completo de autorizaciones
-confirmadas mediante `sync_entitlements`, una operación cerrada del agente.
+confirmadas de los routers asignados a su nodo mediante `sync_entitlements`, una
+operación cerrada del agente. Las instantáneas y los diarios de nodos distintos
+no comparten archivos.
 FreeRADIUS utiliza ese archivo únicamente cuando falla la consulta HTTP, nunca
 para contradecir un rechazo explícito del servidor. Comprueba también la IP
 origen del NAS y la caducidad de credenciales temporales. Un error de base de

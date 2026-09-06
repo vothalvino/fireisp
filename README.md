@@ -4,6 +4,10 @@ Modular ISP management for a fixed-wireless operator in Cuauhtémoc, Chihuahua,
 Mexico. Python/Django, Spanish interface, MXN, prepaid monthly service, Finkok
 and MikroTik PPPoE/FreeRADIUS. One organization can operate multiple branches.
 
+The default installation runs on **one server**. As the ISP grows, the same
+release can run billing, fiscal, core-event or network work on additional servers;
+the existing customer accounts and shared PostgreSQL/Redis remain in place.
+
 ## What is implemented
 
 - Customers, versioned plans, service activation, staff roles and customer portal.
@@ -16,6 +20,10 @@ and MikroTik PPPoE/FreeRADIUS. One organization can operate multiple branches.
   notices, cancellation folios and reviewed retention workflows.
 - Software-managed CHR discovery, pinned SSH identity, reviewed provisioning,
   private WireGuard link, isolated PPPoE laboratory, RADIUS and job audit trail.
+- Separate execution roles for web, core events, billing, fiscal, scheduling and
+  network work, with queue routing, release checks and instance heartbeats.
+- Assigned network nodes with local RADIUS/agent state, scoped callback tokens and
+  serialized provisioning; existing routers remain on the `primary` node.
 - Ubuntu installer, HTTPS, persistent storage, encrypted backups, isolated restore
   verification, health diagnostics and PostgreSQL CI tests.
 
@@ -25,6 +33,24 @@ legal evidence and the real access-network design are separate launch gates.
 See the [staged plan](docs/roadmap.md), [test evidence](docs/testing.md),
 [legal baseline](docs/legal-baseline.md), [fiscal behavior](docs/fiscal.md)
 and [network boundaries](docs/network.md).
+
+## Deployment architecture
+
+The Django business modules share one code release and database. Execution roles
+can be placed independently: move fiscal processing when document work becomes
+heavy, add billing workers when its queue grows, or add network nodes near new
+routers. PostgreSQL and Redis stay shared dependencies. Moving a role does not
+create a separate ISP installation or independently versioned business service.
+
+Network nodes own their local agent, tunnels, RADIUS cache and accounting journal.
+New routers can be assigned to an additional node. Moving an already provisioned
+router requires a reviewed network cutover; starting another worker does not move
+its interfaces or WireGuard endpoint. Additional execution capacity also does not
+provide automatic database or broker failover.
+
+See [growing from one server to several](docs/distributed-deployment.md) for role
+installation, private connectivity and rollback, and
+[network server placement](docs/network-nodes.md) for assignment and cutover limits.
 
 ## Local development
 
@@ -65,7 +91,10 @@ sudo python3 deploy/install.py --hostname isp.example.com --public-ip 203.0.113.
 Replace the example hostname/IP with your server. Configure DNS and provider
 firewall access first. The installer generates private application credentials
 and writes the administrator invitation to `/etc/fireisp/first-login.txt`.
-See [installation, upgrades and recovery](docs/deployment.md).
+See [installation, upgrades and recovery](docs/deployment.md). Keep this default
+until measured load justifies moving a role; the
+[additional-node installer](docs/distributed-deployment.md) connects to the same
+deployment without creating another database or administrator account.
 
 ## License
 

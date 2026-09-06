@@ -86,10 +86,20 @@ CELERY_TASK_TIME_LIMIT = 120
 CELERY_TASK_SOFT_TIME_LIMIT = 100
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_DEFAULT_QUEUE = 'core'
+CELERY_TASK_ROUTES = {'core.tasks.*': {'queue': 'core'}, 'billing.tasks.*': {'queue': 'billing'},
+                      'fiscal.tasks.*': {'queue': 'fiscal'}}
+CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': 600}
+CELERY_TASK_IGNORE_RESULT = True
 CELERY_BEAT_SCHEDULE = {'outbox': {'task': 'core.tasks.deliver_outbox', 'schedule': 15.0},
                         'renewal-preview': {'task': 'billing.tasks.renewal_preview', 'schedule': 3600.0},
-                        'suspension-evaluation': {'task': 'billing.tasks.evaluate_suspensions', 'schedule': 60.0}}
+                        'suspension-evaluation': {'task': 'billing.tasks.evaluate_suspensions', 'schedule': 60.0},
+                        'fiscal-dispatch': {'task': 'fiscal.tasks.dispatch_fiscal_jobs', 'schedule': 30.0}}
 FIREISP_VERSION = os.getenv('FIREISP_VERSION', '0.1.0')
+FIREISP_RELEASE = os.getenv('FIREISP_RELEASE', 'development')
+FIREISP_NODE_ID = os.getenv('FIREISP_NODE_ID', 'primary')
+FIREISP_NODE_ROLE = os.getenv('FIREISP_NODE_ROLE', 'web')
+NETWORK_NODE_ID = os.getenv('NETWORK_NODE_ID', 'primary')
 NETWORK_AGENT_SOCKET = os.getenv('NETWORK_AGENT_SOCKET', '/run/fireisp-network/agent.sock')
 NETWORK_RADIUS_TOKEN = os.getenv('NETWORK_RADIUS_TOKEN', '')
 LOGGING = {'version': 1, 'disable_existing_loggers': False,

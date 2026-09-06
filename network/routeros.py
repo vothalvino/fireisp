@@ -28,6 +28,8 @@ def fingerprint(key):
 
 
 def probe_key(router):
+    from .execution import check_current_lease
+    check_current_lease()
     with socket.create_connection((router.management_host, router.ssh_port), timeout=12) as sock:
         transport = paramiko.Transport(sock)
         try:
@@ -65,10 +67,13 @@ class RouterOS:
             self.client.close()
 
     def run(self, command):
+        from .execution import check_current_lease
+        check_current_lease()
         _, stdout, stderr = self.client.exec_command(command, timeout=20)
         output = stdout.read(512000).decode(errors='replace').strip()
         error = stderr.read(4096).decode(errors='replace').strip()
         status = stdout.channel.recv_exit_status()
+        check_current_lease()
         import re
         mutation = bool(re.match(r'^/[a-z/-]+ (add|set|remove) ', command))
         if status or error or (mutation and output) or any(x in output.lower() for x in ['failure:', 'syntax error', 'expected end of command', 'not enough permissions', 'no such item', 'input does not match', 'invalid value for argument', 'bad command name']):

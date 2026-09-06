@@ -1,4 +1,5 @@
 import uuid
+from django.conf import settings
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
@@ -33,6 +34,8 @@ class FiscalDocument(models.Model):
     payment_form = models.CharField(max_length=2,default='99')
     request_xml = models.TextField(blank=True)
     xml = models.TextField(blank=True)
+    pdf_content = models.BinaryField(blank=True, default=bytes, editable=False)
+    pdf_source_sha256 = models.CharField(max_length=64, blank=True, editable=False)
     cancellation_xml = models.TextField(blank=True)
     cancellation_reason = models.CharField(max_length=2,blank=True)
     cancellation_replacement = models.CharField(max_length=36,blank=True)
@@ -67,3 +70,36 @@ class GlobalBatch(models.Model):
 class GlobalItem(models.Model):
     batch=models.ForeignKey(GlobalBatch,on_delete=models.PROTECT,related_name='items')
     invoice=models.OneToOneField('billing.Invoice',on_delete=models.PROTECT,related_name='global_item')
+
+
+class FiscalJob(models.Model):
+    """Durable work ledger; broker messages carry only this non-secret job ID."""
+    OPERATIONS = [('stamp', 'Timbrado'), ('recover', 'Recuperación'), ('cancel', 'Cancelación'),
+                  ('cancellation_status', 'Consulta de cancelación'), ('verify', 'Verificación de conexión'),
+                  ('pdf', 'Preparación de PDF')]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request_key = models.CharField(max_length=128, unique=True)
+    document = models.ForeignKey(FiscalDocument, null=True, blank=True, on_delete=models.PROTECT, related_name='jobs')
+    profile = models.ForeignKey(FiscalProfile, null=True, blank=True, on_delete=models.PROTECT, related_name='jobs')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    operation = models.CharField(max_length=24, choices=OPERATIONS)
+    payload = models.JSONField(default=dict)
+    status = models.CharField(max_length=16, default='queued', choices=[('queued', 'Pendiente'), ('running', 'En proceso'),
+        ('succeeded', 'Completado'), ('failed', 'No completado'), ('review', 'Requiere revisión')])
+    attempts = models.PositiveSmallIntegerField(default=0)
+    claim_token = models.UUIDField(null=True, editable=False)
+    available_at = models.DateTimeField(default=timezone.now)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    message = models.CharField(max_length=500, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['status', 'available_at'], name='fiscal_job_dispatch')]
+        constraints = [
+            models.CheckConstraint(condition=(Q(operation='verify', profile__isnull=False, document__isnull=True) |
+                (Q(profile__isnull=True, document__isnull=False) & ~Q(operation='verify'))), name='fiscal_job_target'),
+            models.UniqueConstraint(fields=['document'], condition=Q(status__in=['queued', 'running']), name='one_active_fiscal_document_job'),
+            models.UniqueConstraint(fields=['profile'], condition=Q(status__in=['queued', 'running']), name='one_active_fiscal_profile_job'),
+        ]

@@ -1,12 +1,34 @@
 import uuid
 
 from django.conf import settings
-from django.core.validators import MaxValueValidator, MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
 from django.db import models
+
+
+class NetworkNode(models.Model):
+    id = models.CharField(max_length=40, primary_key=True, validators=[RegexValidator(r'^[a-z][a-z0-9-]{0,39}$')])
+    name = models.CharField('Nombre', max_length=100, blank=True)
+    public_endpoint = models.GenericIPAddressField('IPv4 pública', protocol='IPv4', null=True, blank=True)
+    radius_token_digest = models.CharField(max_length=64, blank=True)
+    worker_token = models.UUIDField(null=True, editable=False)
+    lease_expires_at = models.DateTimeField(null=True, editable=False)
+    generation = models.PositiveBigIntegerField(default=0, editable=False)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['radius_token_digest'], condition=~models.Q(radius_token_digest=''), name='network_node_unique_token')]
+
+    def __str__(self):
+        return self.name or self.pk
+
+    @property
+    def health_code(self):
+        return 'network_sync' if self.pk == 'primary' else f'network_sync:{self.pk}'
 
 
 class Router(models.Model):
     organization = models.ForeignKey('core.Organization', on_delete=models.PROTECT)
+    network_node = models.ForeignKey(NetworkNode, verbose_name='Servidor de red', default='primary', on_delete=models.PROTECT, related_name='routers')
+    execution_blocked = models.BooleanField(default=False, editable=False)
     name = models.CharField('Nombre', max_length=100)
     management_host = models.GenericIPAddressField('IPv4 de administración', protocol='IPv4', unique=True)
     ssh_port = models.PositiveIntegerField('Puerto SSH', default=22, validators=[MinValueValidator(1), MaxValueValidator(65535)])
@@ -58,6 +80,8 @@ class ProvisioningJob(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    worker_token = models.UUIDField(null=True, editable=False)
+    worker_generation = models.PositiveBigIntegerField(default=0, editable=False)
 
     class Meta:
         ordering = ['-created_at']

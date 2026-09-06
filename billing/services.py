@@ -312,7 +312,10 @@ def suspension_block(subscription,policy,now=None,check_health=True):
     if Outage.objects.filter(subscriptions=subscription,ended_at__isnull=True).exists():
         return 'Existe una interrupción de servicio abierta; suspensión bloqueada.'
     if check_health:
-        health=HealthCheck.objects.filter(code='network_sync').first()
+        from network.models import RadiusCredential
+        credential = RadiusCredential.objects.select_related('router__network_node').filter(subscription=subscription).first()
+        health_code = credential.router.network_node.health_code if credential else 'network_sync'
+        health=HealthCheck.objects.filter(code=health_code).first()
         if not health or health.status!='ok' or health.checked_at<now-timedelta(seconds=120):
             return 'Sin sincronización de red confirmada en los últimos 120 segundos.'
     return ''

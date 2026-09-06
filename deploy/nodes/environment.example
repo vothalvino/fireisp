@@ -1,0 +1,19 @@
+# Copy outside the checkout; chmod 600 before editing. Never commit the result.
+# Use the SAME application/encryption keys as the existing control server.
+SECRET_KEY=REPLACE_WITH_EXISTING_CLUSTER_SECRET_KEY
+ENCRYPTION_KEY=REPLACE_WITH_EXISTING_CLUSTER_ENCRYPTION_KEY
+ALLOWED_HOSTS=isp.example.test,localhost,127.0.0.1
+CSRF_TRUSTED_ORIGINS=https://isp.example.test
+# The application account must not be a PostgreSQL superuser or have CREATEDB/CREATEROLE.
+# Percent-encode URL credentials. These services must be on an encrypted private
+# network, use verified TLS, or use a pinned SSH tunnel. No public listeners.
+DATABASE_URL=postgresql://fireisp:REPLACE_PASSWORD@10.42.0.10:5432/fireisp
+REDIS_URL=redis://:REPLACE_PASSWORD@10.42.0.10:6379/0
+FIREISP_VERSION=0.1.0
+
+# Only a network role requires the following. Use the node registration token
+# and the NEW node's public router-tunnel endpoint, not the control server's IP.
+# The callback must reach the private application listener; public HTTPS blocks it.
+# NETWORK_RADIUS_TOKEN=REPLACE_WITH_THIS_NODES_REGISTERED_TOKEN
+# NETWORK_RADIUS_URL=http://10.42.0.10:18000/network/radius
+# NETWORK_PUBLIC_ENDPOINT=REPLACE_WITH_NETWORK_NODES_PUBLIC_IPV4

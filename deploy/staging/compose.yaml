@@ -37,6 +37,8 @@ services:
     build:
       context: ${FIREISP_SOURCE_DIR:-../..}
       dockerfile: Dockerfile
+      args:
+        FIREISP_RELEASE: ${FIREISP_RELEASE:-development}
     restart: unless-stopped
     env_file: .env
     ports:
@@ -61,7 +63,11 @@ services:
     image: fireisp:staging
     restart: unless-stopped
     env_file: .env
-    command: [celery, -A, fireisp.celery, worker, --concurrency=1, --loglevel=warning]
+    command: [python, manage.py, run_role, --role, worker, --concurrency, '1']
+    environment:
+      FIREISP_NODE_ID: primary-events
+      FIREISP_NODE_ROLE: worker
+    stop_grace_period: 180s
     depends_on:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -70,11 +76,51 @@ services:
     mem_limit: 350m
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+  billing-worker:
+    image: fireisp:staging
+    profiles: [billing]
+    restart: unless-stopped
+    env_file: .env
+    command: [python, manage.py, run_role, --role, billing, --concurrency, '1']
+    environment:
+      FIREISP_NODE_ID: primary-billing
+      FIREISP_NODE_ROLE: billing
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    mem_limit: 350m
+    stop_grace_period: 180s
+    read_only: true
+    tmpfs: [/tmp:size=64m]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  fiscal-worker:
+    image: fireisp:staging
+    profiles: [fiscal]
+    restart: unless-stopped
+    env_file: .env
+    command: [python, manage.py, run_role, --role, fiscal, --concurrency, '1']
+    environment:
+      FIREISP_NODE_ID: primary-fiscal
+      FIREISP_NODE_ROLE: fiscal
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    mem_limit: 600m
+    stop_grace_period: 180s
+    read_only: true
+    tmpfs: [/tmp:size=96m, /home/fireisp/.cache:size=64m]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
   beat:
     image: fireisp:staging
     restart: unless-stopped
     env_file: .env
-    command: [celery, -A, fireisp.celery, beat, --schedule=/tmp/celerybeat-schedule, --loglevel=warning]
+    command: [python, manage.py, run_scheduler]
+    environment:
+      FIREISP_NODE_ID: primary-scheduler
+      FIREISP_NODE_ROLE: scheduler
+    stop_grace_period: 15s
     depends_on:
       redis: {condition: service_healthy}
     mem_limit: 160m
@@ -82,9 +128,15 @@ services:
     security_opt: [no-new-privileges:true]
   network-worker:
     image: fireisp:staging
+    profiles: [network]
     restart: unless-stopped
     env_file: .env
     command: [python, manage.py, run_network_jobs]
+    environment:
+      FIREISP_NODE_ID: primary-network
+      FIREISP_NODE_ROLE: network
+      NETWORK_NODE_ID: primary
+    stop_grace_period: 180s
     depends_on:
       db: {condition: service_healthy}
     volumes:
@@ -93,9 +145,12 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   network-agent:
+    profiles: [network]
     build:
       context: ${FIREISP_SOURCE_DIR:-../..}
       dockerfile: deploy/network/Dockerfile.agent
+      args:
+        FIREISP_RELEASE: ${FIREISP_RELEASE:-development}
     image: fireisp-network-agent:staging
     restart: unless-stopped
     network_mode: host
@@ -112,9 +167,12 @@ services:
       - radius_config:/var/lib/fireisp-radius
     mem_limit: 192m
   radius:
+    profiles: [network]
     build:
       context: ${FIREISP_SOURCE_DIR:-../..}
       dockerfile: deploy/network/Dockerfile.radius
+      args:
+        FIREISP_RELEASE: ${FIREISP_RELEASE:-development}
     image: fireisp-radius:staging
     restart: unless-stopped
     network_mode: host

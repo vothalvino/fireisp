@@ -17,6 +17,7 @@ from core.services import audit
 from network.agent_client import call_agent
 from network.models import ProvisioningJob, RadiusCredential, RadiusSession, Router
 from network.routeros import RouterOS
+from network.execution import node_execution, require_local_router
 from network.services import lab_queue_rates, mark_readiness, sync_confirmed_entitlements
 
 
@@ -33,7 +34,12 @@ class Command(BaseCommand):
         self.stdout.write(json.dumps(value, ensure_ascii=False, default=str))
 
     def handle(self, *args, **options):
+        with node_execution():
+            return self.run_phase(*args, **options)
+
+    def run_phase(self, *args, **options):
         router = Router.objects.get(pk=options['router_id'])
+        require_local_router(router)
         if not router.is_lab or not router.provisioned_at or not router.organization.demo_mode:
             raise CommandError('Se necesita un router de laboratorio demo aprovisionado.')
         if options['phase'] == 'prepare':

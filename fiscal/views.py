@@ -13,11 +13,12 @@ from billing.models import Allocation,Invoice,CreditMemo
 from .models import FiscalDocument,FiscalProfile
 from .forms import CancellationForm,IssueForm,ProfileForm,GlobalForm
 from . import services
+from .jobs import queue_job,pdf_ready
 
 
 @staff_required
 def index(request):
-    return render(request,'fiscal/index.html',{'documents':FiscalDocument.objects.select_related('invoice__customer')[:100]})
+    return render(request,'fiscal/index.html',{'documents':FiscalDocument.objects.select_related('invoice__customer').defer('pdf_content')[:100]})
 
 
 def _document_redirect(doc):
@@ -29,9 +30,10 @@ def global_create(request):
     form=GlobalForm(request.POST or None)
     if request.method=='POST' and form.is_valid():
         try:
-            document=services.prepare_global(Organization.objects.first(),actor=request.user,**form.cleaned_data)
-            services.stamp_document(document,request.user)
-            messages.success(request,'Factura global timbrada en DEMO.')
+            with transaction.atomic():
+                document=services.prepare_global(Organization.objects.first(),actor=request.user,defer_build=True,**form.cleaned_data)
+                queue_job('stamp',document=document,actor=request.user)
+            messages.success(request,'Solicitud de factura global registrada. El resultado aparecerá en este documento.')
             return redirect('fiscal:global_detail',pk=document.pk)
         except (ValidationError,FiscalProfile.DoesNotExist) as exc:
             form.add_error(None,exc if isinstance(exc,ValidationError) else 'Configura primero Finkok DEMO.')
@@ -49,9 +51,10 @@ def global_detail(request,pk):
 def credit_issue(request,pk):
     memo=get_object_or_404(CreditMemo,pk=pk)
     try:
-        document=services.prepare_credit_document(memo,request.user)
-        services.stamp_document(document,request.user)
-        messages.success(request,'CFDI de egreso timbrado en DEMO.')
+        with transaction.atomic():
+            document=services.prepare_credit_document(memo,request.user,defer_build=True)
+            queue_job('stamp',document=document,actor=request.user)
+        messages.success(request,'Solicitud de CFDI de egreso registrada.')
     except ValidationError as exc:
         messages.error(request,'; '.join(exc.messages))
     return redirect('fiscal:invoice',pk=memo.invoice_id)
@@ -90,8 +93,8 @@ def verify(request):
         raise PermissionDenied
     profile=get_object_or_404(FiscalProfile,organization=Organization.objects.first())
     try:
-        ok,status=services.verify_credentials(profile,request.user)
-        (messages.success if ok else messages.error)(request,status)
+        queue_job('verify',profile=profile,actor=request.user)
+        messages.success(request,'Verificación solicitada. Actualiza esta página para consultar el resultado.')
     except ValidationError as exc:
         messages.error(request,'; '.join(exc.messages))
     return redirect('fiscal:settings')
@@ -103,13 +106,14 @@ def invoice(request,pk):
     form=IssueForm(request.POST or None)
     if request.method=='POST' and form.is_valid():
         try:
-            doc=services.prepare_document(invoice,request.user,**form.cleaned_data)
-            services.stamp_document(doc,request.user)
-            messages.success(request,'CFDI timbrado en Finkok DEMO.')
+            with transaction.atomic():
+                doc=services.prepare_document(invoice,request.user,defer_build=True,**form.cleaned_data)
+                queue_job('stamp',document=doc,actor=request.user)
+            messages.success(request,'Solicitud de CFDI registrada. El resultado aparecerá en esta página.')
             return redirect('fiscal:invoice',pk=pk)
         except (ValidationError,FiscalProfile.DoesNotExist) as exc:
             form.add_error(None,exc if isinstance(exc,ValidationError) else 'Configura Finkok DEMO antes de facturar.')
-    return render(request,'fiscal/invoice.html',{'invoice':invoice,'form':form,'documents':invoice.fiscal_documents.all(),
+    return render(request,'fiscal/invoice.html',{'invoice':invoice,'form':form,'documents':invoice.fiscal_documents.defer('pdf_content'),
         'allocations':invoice.allocations.filter(payment__reversal__isnull=True).select_related('payment')})
 
 
@@ -118,8 +122,8 @@ def invoice(request,pk):
 def recover(request,pk):
     doc=get_object_or_404(FiscalDocument,pk=pk)
     try:
-        services.stamp_document(doc,request.user,recover=True)
-        messages.success(request,'CFDI recuperado del PAC.')
+        queue_job('recover',document=doc,actor=request.user)
+        messages.success(request,'Recuperación solicitada. Se consultará el mismo XML al PAC.')
     except ValidationError as exc:
         messages.error(request,'; '.join(exc.messages))
     return _document_redirect(doc)
@@ -130,9 +134,10 @@ def recover(request,pk):
 def complement(request,pk):
     allocation=get_object_or_404(Allocation,pk=pk)
     try:
-        doc=services.prepare_document(allocation.invoice,request.user,allocation=allocation)
-        services.stamp_document(doc,request.user)
-        messages.success(request,'Complemento de pago 2.0 timbrado en DEMO.')
+        with transaction.atomic():
+            doc=services.prepare_document(allocation.invoice,request.user,allocation=allocation,defer_build=True)
+            queue_job('stamp',document=doc,actor=request.user)
+        messages.success(request,'Solicitud de complemento de pago 2.0 registrada.')
     except (ValidationError,FiscalDocument.DoesNotExist,FiscalProfile.DoesNotExist) as exc:
         messages.error(request,'; '.join(exc.messages) if isinstance(exc,ValidationError) else 'Se requiere la factura PPD timbrada y la configuración del PAC.')
     return redirect('fiscal:invoice',pk=allocation.invoice_id)
@@ -144,8 +149,8 @@ def cancel(request,pk):
     form=CancellationForm(request.POST or None)
     if request.method=='POST' and form.is_valid():
         try:
-            services.cancel_document(doc,request.user,form.cleaned_data['reason'],str(form.cleaned_data['replacement'] or ''))
-            messages.success(request,'Solicitud de cancelación enviada. Consulta el estado hasta obtener confirmación del SAT DEMO.')
+            queue_job('cancel',document=doc,actor=request.user,payload={'reason':form.cleaned_data['reason'],'replacement':str(form.cleaned_data['replacement'] or '')})
+            messages.success(request,'Solicitud de cancelación registrada. Consulta el estado hasta obtener confirmación del SAT DEMO.')
             return _document_redirect(doc)
         except ValidationError as exc:
             form.add_error(None,exc)
@@ -157,9 +162,10 @@ def cancel(request,pk):
 def cancellation_status(request,pk):
     doc=get_object_or_404(FiscalDocument,pk=pk)
     try:
-        messages.info(request,'Estado informado por SAT DEMO: '+services.refresh_cancellation(doc,request.user))
-    except Exception:
-        messages.error(request,'No fue posible consultar el estado. El documento conserva su estado anterior.')
+        queue_job('cancellation_status',document=doc,actor=request.user)
+        messages.info(request,'Consulta de cancelación solicitada. Actualiza esta página para ver el resultado.')
+    except ValidationError as exc:
+        messages.error(request,'; '.join(exc.messages))
     return _document_redirect(doc)
 
 
@@ -173,15 +179,22 @@ def download(request,pk,format):
     if format=='xml':
         response=HttpResponse(doc.xml,content_type='application/xml')
     elif format=='pdf':
-        from satcfdi.cfdi import CFDI
-        from satcfdi import render as cfdi_render
-        response=HttpResponse(cfdi_render.pdf_bytes(CFDI.from_string(doc.xml.encode())),content_type='application/pdf')
+        if not pdf_ready(doc):
+            try:
+                queue_job('pdf',document=doc,actor=request.user)
+            except ValidationError:
+                pass  # An existing fiscal operation finishes before PDF preparation.
+            response=render(request,'fiscal/pdf_pending.html',{'doc':doc},status=202)
+            response['Retry-After']='10'
+        else:
+            response=HttpResponse(bytes(doc.pdf_content),content_type='application/pdf')
     elif format=='acuse' and doc.cancellation_xml:
         response=HttpResponse(doc.cancellation_xml,content_type='application/xml')
     else:
         raise PermissionDenied
     suffix='xml' if format=='acuse' else format
-    response['Content-Disposition']=f'attachment; filename="DEMO-{doc.uuid}-{format}.{suffix}"'
+    if response.status_code==200:
+        response['Content-Disposition']=f'attachment; filename="DEMO-{doc.uuid}-{format}.{suffix}"'
     response['Cache-Control']='private, no-store'
     response['X-Content-Type-Options']='nosniff'
     return response

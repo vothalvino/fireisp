@@ -233,6 +233,86 @@ class BackupSafetyTests(SimpleTestCase):
 
 
 class InstallerSafetyTests(SimpleTestCase):
+    def test_profile_preservation_handles_empty_quoted_and_exported_values(self):
+        for text, expected in [
+            ("COMPOSE_PROFILES=''\n", ''),
+            ('  export COMPOSE_PROFILES = "billing, network" # placement\n', 'billing,network'),
+            ('COMPOSE_PROFILES=network\n', 'network'),
+        ]:
+            with self.subTest(text=text):
+                self.assertIsNone(install.local_profiles(None, text))
+                self.assertEqual(install.existing_profiles(text), expected)
+        self.assertEqual(install.local_profiles(None, 'SECRET_KEY=fixture\n'), 'billing,fiscal,network')
+        self.assertEqual(install.local_profiles('', "COMPOSE_PROFILES='network'\n"), '')
+        for text in ("COMPOSE_PROFILES='unclosed\n", 'COMPOSE_PROFILES=*\n',
+                     'COMPOSE_PROFILES=billing\nCOMPOSE_PROFILES=network\n'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                install.local_profiles(None, text)
+
+    def test_explicit_placement_replaces_exported_setting_without_touching_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / '.env'
+            path.write_text("SECRET_KEY='literal$secret'\n  export COMPOSE_PROFILES = 'billing,network'\n")
+            install.update_public_environment(path, {'COMPOSE_PROFILES': 'billing'})
+            self.assertEqual(path.read_text(), "SECRET_KEY='literal$secret'\nCOMPOSE_PROFILES='billing'\n")
+
+    def test_disabled_or_restarting_workers_are_drained_and_removed_network_services_stop(self):
+        compose = ['docker', 'compose', '-f', 'fixture.yaml']
+        present = 'db\nredis\nweb\nbeat\nworker\nbilling-worker\nfiscal-worker\nnetwork-worker\nnetwork-agent\nradius\n'
+        with patch.object(install.subprocess, 'check_output', return_value=present) as inspect, patch.object(install, 'run') as run:
+            stopped = install.drain_local_executors(compose, 'billing')
+        inspect.assert_called_once_with(compose + ['--profile', '*', 'ps', '--all', '--services'], text=True)
+        self.assertEqual(stopped, ['beat', 'worker', 'billing-worker', 'fiscal-worker', 'network-worker', 'radius', 'network-agent'])
+        self.assertTrue(all(call.args[:len(compose) + 2] == (*compose, '--profile', '*') for call in run.call_args_list))
+        self.assertLess(stopped.index('network-worker'), stopped.index('radius'))
+        self.assertFalse(any(name in stopped for name in ('db', 'redis', 'web')))
+
+    def test_retained_network_services_keep_radius_running_during_executor_drain(self):
+        with patch.object(install.subprocess, 'check_output', return_value='network-worker\nnetwork-agent\nradius\n'), patch.object(install, 'run') as run:
+            self.assertEqual(install.drain_local_executors(['docker', 'compose'], 'billing,fiscal,network'), ['network-worker'])
+        run.assert_called_once_with('docker', 'compose', '--profile', '*', 'stop', '--timeout', '180', 'network-worker')
+
+    def test_first_install_drain_has_no_existing_services_to_stop(self):
+        with patch.object(install.subprocess, 'check_output', return_value=''), patch.object(install, 'run') as run:
+            self.assertEqual(install.drain_local_executors(['docker', 'compose'], 'billing,fiscal,network'), [])
+        run.assert_not_called()
+
+    def test_explicit_release_cannot_mislabel_an_unrelated_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.git').mkdir()
+            with patch.object(install.subprocess, 'check_output', side_effect=['', 'a' * 40]):
+                with self.assertRaises(ValueError):
+                    install.release_identity(root, 'b' * 40)
+            with patch.object(install.subprocess, 'check_output', return_value=' M changed.py\n'):
+                with self.assertRaises(ValueError):
+                    install.release_identity(root, 'a' * 40)
+
+    def test_remote_upgrade_guard_blocks_active_executors_but_not_local_or_stopped_roles(self):
+        now = datetime(2026, 9, 6, tzinfo=timezone.utc)
+        def node(identifier, role='fiscal', status='ready', age=0):
+            return {'identifier': identifier, 'role': role, 'status': status,
+                    'last_seen': now - timedelta(seconds=age)}
+        nodes = [node('remote-fiscal:fiscal'), node('remote-scheduler:scheduler', 'scheduler', 'standby'),
+                 node('primary-events:worker', 'worker'), node('primary-fiscal:fiscal'),
+                 node('primary-network:network', 'network'), node('remote-stopped:fiscal', status='stopped'),
+                 node('remote-failed:fiscal', status='failed'), node('old-node:fiscal', age=91),
+                 node('web-2:web', 'web')]
+        self.assertEqual(install.active_remote_executors(nodes, now), ['remote-fiscal:fiscal', 'remote-scheduler:scheduler'])
+
+    def test_remote_upgrade_guard_allows_first_upgrade_without_registry_table(self):
+        with patch('django.db.connection.introspection.table_names', return_value=[]), patch('core.models.RuntimeNode.objects.filter') as query:
+            install.require_remote_executors_drained()
+        query.assert_not_called()
+
+    def test_remote_upgrade_guard_refuses_migration_when_a_remote_worker_is_ready(self):
+        now = datetime(2026, 9, 6, tzinfo=timezone.utc)
+        with patch('django.db.connection.introspection.table_names', return_value=['core_runtimenode']), patch('django.utils.timezone.now', return_value=now), patch('core.models.RuntimeNode.objects.filter') as query:
+            query.return_value.values.return_value = [{'identifier': 'fiscal-2:fiscal', 'role': 'fiscal',
+                                                       'status': 'ready', 'last_seen': now}]
+            with self.assertRaisesMessage(SystemExit, 'Gracefully drain remote nodes before migrating'):
+                install.require_remote_executors_drained()
+
     def test_private_writer_refuses_symlink_without_touching_target(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

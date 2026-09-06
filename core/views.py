@@ -78,6 +78,9 @@ class LoginView(DjangoLoginView):
 def health(request):
     try:
         with connection.cursor() as cursor: cursor.execute('SELECT 1')
+        if settings.FIREISP_RELEASE != 'development':
+            from .runtime import heartbeat
+            heartbeat('web')
         return JsonResponse({'application_ready': True, 'database_ready': True, 'version': settings.FIREISP_VERSION})
     except Exception:
         return JsonResponse({'application_ready': False, 'database_ready': False}, status=503)
@@ -228,14 +231,20 @@ def settings_view(request):
 
 @staff_required
 def system_health(request):
-    from .models import HealthCheck, OutboxEvent
+    from .models import HealthCheck, OutboxEvent, RuntimeNode
     from network.models import Router, ProvisioningJob
     from fiscal.models import FiscalProfile
     checks = list(HealthCheck.objects.all())
     for check in checks:
-        max_age = {'backup': timedelta(minutes=45), 'network_sync': timedelta(seconds=120), 'offsite': timedelta(days=1)}.get(check.code, timedelta(days=7))
+        max_age = timedelta(seconds=120) if check.code.startswith('network_sync') else {'backup': timedelta(minutes=45), 'offsite': timedelta(days=1)}.get(check.code, timedelta(days=7))
         check.stale = check.checked_at < timezone.now() - max_age
+    nodes = list(RuntimeNode.objects.all())
+    for node in nodes:
+        node.stale = node.last_seen < timezone.now() - timedelta(seconds=90)
+        node.role_label = {'web': 'Aplicación', 'worker': 'Eventos', 'billing': 'Cobranza',
+                           'fiscal': 'Facturación fiscal', 'scheduler': 'Programación', 'network': 'Red'}.get(node.role, node.role)
     return render(request, 'core/system_health.html', {'checks': checks, 'routers': Router.objects.all(), 'profile': FiscalProfile.objects.first(),
+        'runtime_nodes': nodes,
         'failed_jobs': ProvisioningJob.objects.filter(status='failed').count(),
         'exhausted_events': OutboxEvent.objects.filter(delivered_at__isnull=True, attempts__gte=5).count()})
 
@@ -299,12 +308,12 @@ def portal_payments(request):
     customer = _portal_customer(request)
     return render(request, 'core/portal_payments.html', {'invoices': Invoice.objects.with_balances().filter(customer=customer).order_by('-created_at')[:100],
         'payments': Payment.objects.filter(customer=customer).order_by('-created_at')[:100],
-        'documents': FiscalDocument.objects.filter(invoice__customer=customer).exclude(uuid='').order_by('-created_at')[:100]})
+        'documents': FiscalDocument.objects.defer('pdf_content').filter(invoice__customer=customer).exclude(uuid='').order_by('-created_at')[:100]})
 
 def portal_document(request, pk, format):
     from fiscal.models import FiscalDocument
     from fiscal.views import download
-    get_object_or_404(FiscalDocument, pk=pk, invoice__customer=_portal_customer(request))
+    get_object_or_404(FiscalDocument.objects.defer('pdf_content'), pk=pk, invoice__customer=_portal_customer(request))
     return download(request, pk, format)
 
 def portal_support(request):

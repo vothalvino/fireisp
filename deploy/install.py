@@ -2,12 +2,14 @@
 """Repeatable Ubuntu installer. Run from an inspected checkout as root."""
 import argparse
 import base64
+from datetime import timedelta
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import ssl
@@ -30,10 +32,115 @@ def supported_ubuntu(contents):
     fields = dict(line.split('=', 1) for line in contents.splitlines() if '=' in line and not line.startswith('#'))
     return fields.get('ID', '').strip('"\'') == 'ubuntu' and fields.get('VERSION_ID', '').strip('"\'') == '24.04'
 
+
+def release_identity(source, explicit=None):
+    if (source / '.git').exists():
+        if subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain'], text=True).strip():
+            raise ValueError('Commit or discard source changes before installing a release.')
+        release = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+        if explicit and explicit != release:
+            raise ValueError('The requested release does not match the inspected source checkout.')
+    elif explicit:
+        release = explicit
+    elif (source / 'RELEASE').is_file():
+        release = (source / 'RELEASE').read_text().strip()
+    else:
+        raise ValueError('Use an inspected Git checkout or pass its full commit with --release.')
+    if not re.fullmatch(r'[0-9a-f]{40}', release):
+        raise ValueError('Release must be a full Git commit SHA.')
+    return release
+
+
+def profile_selection(value):
+    roles = set(filter(None, (part.strip() for part in value.split(','))))
+    if not roles <= {'billing', 'fiscal', 'network'}:
+        raise ValueError('Local workers must be a comma-separated selection of billing,fiscal,network.')
+    return ','.join(sorted(roles))
+
+
+def existing_profiles(existing):
+    matches = re.findall(r'^\s*(?:export\s+)?COMPOSE_PROFILES\s*=([^\r\n]*)$', existing, re.MULTILINE)
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError('The environment contains duplicate COMPOSE_PROFILES entries; keep one explicit placement.')
+    try:
+        parts = shlex.split(matches[0], comments=True)
+    except ValueError:
+        raise ValueError('COMPOSE_PROFILES contains invalid quoting.') from None
+    if len(parts) > 1:
+        raise ValueError('Quote the complete COMPOSE_PROFILES selection on one line.')
+    return profile_selection(parts[0] if parts else '')
+
+
+def local_profiles(requested, existing):
+    if requested is None and existing_profiles(existing) is not None:
+        return None  # Preserve deliberate placement on later installer runs.
+    return profile_selection('billing,fiscal,network' if requested is None else requested)
+
+
+def drain_local_executors(compose, profiles):
+    """See disabled/restarting roles too; stop executors before shared migration."""
+    all_profiles = [*compose, '--profile', '*']
+    # --all includes a restarting/exited container with a restart policy. Stopping
+    # an already stopped service is harmless; omitting a restarting worker is not.
+    present = set(subprocess.check_output(all_profiles + ['ps', '--all', '--services'], text=True).split())
+    stopped = []
+    for service in ('beat', 'worker', 'billing-worker', 'fiscal-worker', 'network-worker'):
+        if service in present:
+            run(*all_profiles, 'stop', '--timeout', '180', service)
+            stopped.append(service)
+    if 'network' not in profile_selection(profiles).split(','):
+        # Keep local accounting/tunnel files intact for replay and reviewed cleanup.
+        # Stop RADIUS only after its job executor has drained.
+        for service in ('radius', 'network-agent'):
+            if service in present:
+                run(*all_profiles, 'stop', '--timeout', '30', service)
+                stopped.append(service)
+    return stopped
+
+
+LOCAL_EXECUTOR_IDENTITIES = {
+    'primary-events:worker', 'primary-billing:billing', 'primary-fiscal:fiscal',
+    'primary-network:network', 'primary-scheduler:scheduler',
+}
+
+
+def active_remote_executors(nodes, now):
+    """Reject known active remote roles; this does not perform a remote drain."""
+    cutoff = now - timedelta(seconds=90)
+    roles = {'worker', 'billing', 'fiscal', 'network', 'scheduler'}
+    return sorted({node['identifier'] for node in nodes
+                   if node['identifier'] not in LOCAL_EXECUTOR_IDENTITIES
+                   and node['role'] in roles and node['status'] in {'ready', 'standby'}
+                   and node['last_seen'] >= cutoff})
+
+
+def require_remote_executors_drained():
+    # Invoked inside the newly built web image BEFORE migrations. The first
+    # upgrade from an older release does not yet have the runtime registry table.
+    from django.db import connection
+    from django.utils import timezone
+    from core.models import RuntimeNode
+    if RuntimeNode._meta.db_table not in connection.introspection.table_names():
+        return
+    now = timezone.now()
+    nodes = RuntimeNode.objects.filter(last_seen__gte=now - timedelta(seconds=90)).values(
+        'identifier', 'role', 'status', 'last_seen')
+    active = active_remote_executors(nodes, now)
+    if active:
+        raise SystemExit('Remote executors are still active: ' + ', '.join(active[:10]) +
+                         '. Gracefully drain remote nodes before migrating; this installer only controls local roles.')
+
+
 def update_public_environment(path, values):
     # Preserve generated credentials byte-for-byte while updating this inspected checkout and hostname.
     existing = path.read_text() if path.exists() else ''
-    lines = [line for line in existing.splitlines() if line.split('=', 1)[0] not in values]
+    lines = []
+    for line in existing.splitlines():
+        match = re.match(r'^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=', line)
+        if not match or match[1] not in values:
+            lines.append(line)
     for key, value in values.items():
         if any(character in str(value) for character in '\r\n\0'):
             raise ValueError('Environment values cannot contain line breaks.')
@@ -120,12 +227,23 @@ def main():
     parser.add_argument('--public-ip', required=True)
     parser.add_argument('--source', type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument('--demo-data', action='store_true')
+    parser.add_argument('--release', help='Full commit SHA when installing an exported source archive')
+    parser.add_argument('--local-workers', help='Local roles: billing,fiscal,network. Defaults to all on first install; preserves placement on reruns.')
     options = parser.parse_args()
     if os.geteuid() != 0: parser.error('Run the installer as root.')
     if len(options.hostname) > 253 or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in options.hostname.split('.')): parser.error('Invalid hostname.')
     ipaddress.IPv4Address(options.public_ip)
     if not supported_ubuntu(Path('/etc/os-release').read_text()): parser.error('This installer supports Ubuntu 24.04 only.')
     options.source = options.source.resolve()
+    try:
+        release = release_identity(options.source, options.release)
+        staging = Path('/opt/fireisp/staging')
+        env_file = staging / '.env'
+        previous_environment = env_file.read_text() if env_file.exists() else ''
+        profiles = local_profiles(options.local_workers, previous_environment)
+        effective_profiles = profiles if profiles is not None else existing_profiles(previous_environment)
+    except ValueError as exc:
+        parser.error(str(exc))
     for name in ('Dockerfile', 'deploy/backup.py', 'deploy/check_caddy.py', 'deploy/staging/Dockerfile.caddy', 'deploy/staging/compose.yaml', 'deploy/staging/Caddyfile', 'deploy/staging/postgres-init.sh', 'deploy/fireisp-backup.service', 'deploy/fireisp-backup.timer'):
         if not (options.source / name).is_file(): parser.error('The source checkout is incomplete.')
     if shutil.disk_usage('/').free < 5 * 1024**3: parser.error('At least 5 GiB of free storage is required.')
@@ -151,11 +269,11 @@ def main():
     if not shutil.which('age'):
         run('apt-get', 'update')
         run('apt-get', 'install', '-y', 'age')
-    run('modprobe', 'ppp_generic')
-    if not Path('/dev/ppp').exists(): run('mknod', '-m', '600', '/dev/ppp', 'c', '108', '0')
+    if 'network' in effective_profiles.split(','):
+        run('modprobe', 'ppp_generic')
+        if not Path('/dev/ppp').exists(): run('mknod', '-m', '600', '/dev/ppp', 'c', '108', '0')
     private = Path('/etc/fireisp'); private.mkdir(mode=0o700, exist_ok=True); private.chmod(0o700)
-    staging = Path('/opt/fireisp/staging'); staging.mkdir(parents=True, exist_ok=True)
-    env_file = staging / '.env'
+    staging.mkdir(parents=True, exist_ok=True)
     if not env_file.exists():
         app_password = secrets.token_urlsafe(36)
         values = {'STAGING_HOSTNAME': options.hostname, 'FIREISP_SOURCE_DIR': str(options.source.resolve()),
@@ -170,9 +288,12 @@ def main():
                   'NETWORK_RADIUS_TOKEN': secrets.token_urlsafe(48),
                   'NETWORK_PUBLIC_ENDPOINT': options.public_ip, 'FIREISP_VERSION': '0.1.0'}
         write_private(env_file, ''.join(f'{key}={value}\n' for key, value in values.items()))
+    placement = {'FIREISP_RELEASE': release}
+    if profiles is not None:
+        placement['COMPOSE_PROFILES'] = profiles
     update_public_environment(env_file, {'STAGING_HOSTNAME': options.hostname, 'FIREISP_SOURCE_DIR': str(options.source),
         'ALLOWED_HOSTS': f'{options.hostname},localhost,127.0.0.1,web', 'CSRF_TRUSTED_ORIGINS': f'https://{options.hostname}',
-        'NETWORK_PUBLIC_ENDPOINT': options.public_ip})
+        'NETWORK_PUBLIC_ENDPOINT': options.public_ip, **placement})
     for filename in ('compose.yaml', 'Caddyfile', 'postgres-init.sh'):
         source = options.source / 'deploy' / 'staging' / filename
         destination = staging / filename
@@ -189,7 +310,15 @@ def main():
         if status.returncode == 0: break
         time.sleep(2)
     else: raise RuntimeError('Database did not become ready.')
+    run(*compose, 'run', '--rm', '--no-deps', 'web', 'python', '-c',
+        "import os; os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'fireisp.settings'); "
+        "import django; django.setup(); from deploy.install import require_remote_executors_drained; "
+        "require_remote_executors_drained()")
+    # Drain old executors before changing shared schema/release. Profiles omitted
+    # on this run may still have running containers from an earlier placement.
+    drain_local_executors(compose, effective_profiles)
     run(*compose, 'run', '--rm', '--no-deps', 'web', 'python', 'manage.py', 'migrate', '--noinput')
+    run(*compose, 'run', '--rm', '--no-deps', 'web', 'python', 'manage.py', 'set_deployment_release', '--release', release)
     run(*compose, 'run', '--rm', '--no-deps', '--user', '0', '-v', '/etc/fireisp:/run/bootstrap', 'web', 'python', 'manage.py', 'bootstrap', '--invitation-file', '/run/bootstrap/first-login.txt', '--url', f'https://{options.hostname}')
     if options.demo_data: run(*compose, 'run', '--rm', '--no-deps', 'web', 'python', 'manage.py', 'seed_demo')
     run(*compose, 'up', '-d', '--remove-orphans')

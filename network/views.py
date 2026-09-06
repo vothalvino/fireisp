@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import secrets
@@ -16,9 +17,9 @@ from core.secrets import decrypt
 from core.security import staff_required
 from core.services import audit
 from .forms import ReviewForm, RouterForm, TrustForm
-from .models import ProvisioningJob, RadiusCredential, RadiusSession, Router
+from .models import NetworkNode, ProvisioningJob, RadiusCredential, RadiusSession, Router
 from .routeros import RouterError, fingerprint
-from .services import addressing, build_plan, enqueue
+from .services import addressing, build_plan, enqueue, retry_reviewed_job
 
 
 @staff_required
@@ -100,11 +101,10 @@ def action(request, pk, action):
 @require_POST
 def retry_job(request, job_id):
     job = get_object_or_404(ProvisioningJob, pk=job_id)
-    if job.status != 'failed':
-        return HttpResponse(status=409)
-    job.status = 'pending'
-    job.save(update_fields=['status'])
-    audit(request.user, 'network.job.retry', job.router, {'job': str(job.pk)})
+    try:
+        retry_reviewed_job(job, request.user)
+    except RouterError as exc:
+        return HttpResponse(str(exc), status=409)
     return redirect('network:detail', pk=job.router_id)
 
 
@@ -119,10 +119,23 @@ def rollback_job(request, job_id):
 
 
 def radius_payload(request):
-    token = getattr(settings, 'NETWORK_RADIUS_TOKEN', '') or os.environ.get('NETWORK_RADIUS_TOKEN', '')
     provided = request.headers.get('Authorization', '')
-    if len(token) < 32 or not secrets.compare_digest(provided.encode(), ('Bearer ' + token).encode()):
+    if not provided.startswith('Bearer ') or len(provided) > 1024:
         return None, JsonResponse({'error': 'unauthorized'}, status=401)
+    value = provided.removeprefix('Bearer ')
+    if len(value) < 32:
+        return None, JsonResponse({'error': 'unauthorized'}, status=401)
+    digest = hashlib.sha256(value.encode()).hexdigest()
+    # A token grants only its registered node, never an arbitrary header/NAS IP.
+    node = NetworkNode.objects.filter(radius_token_digest=digest).first()
+    if not node:
+        token = getattr(settings, 'NETWORK_RADIUS_TOKEN', '') or os.environ.get('NETWORK_RADIUS_TOKEN', '')
+        primary = NetworkNode.objects.filter(pk='primary').first()
+        if primary and not primary.radius_token_digest and len(token) >= 32 and secrets.compare_digest(value.encode(), token.encode()):
+            node = primary
+    if not node:
+        return None, JsonResponse({'error': 'unauthorized'}, status=401)
+    request.network_node_id = node.pk
     if request.method != 'POST' or request.content_type != 'application/json' or len(request.body) > 262144:
         return None, JsonResponse({'error': 'invalid request'}, status=400)
     try:
@@ -143,9 +156,9 @@ def attr(data, name, default=''):
     return str(value)
 
 
-def radius_router(data):
+def radius_router(data, node_id='primary'):
     source = attr(data, 'Packet-Src-IP-Address') or attr(data, 'NAS-IP-Address')
-    for router in Router.objects.filter(provisioned_at__isnull=False):
+    for router in Router.objects.filter(provisioned_at__isnull=False, network_node_id=node_id):
         if addressing(router.pk)['router'] == source:
             return router
     return None
@@ -156,7 +169,7 @@ def radius_authorize(request):
     data, error = radius_payload(request)
     if error:
         return error
-    router = radius_router(data)
+    router = radius_router(data, request.network_node_id)
     username = attr(data, 'User-Name')
     credential = RadiusCredential.objects.select_related('subscription__plan', 'subscription__customer').filter(router=router, username=username, enabled=True).first() if router else None
     if not credential or (credential.expires_at and credential.expires_at <= timezone.now()):
@@ -180,7 +193,7 @@ def radius_accounting(request):
     data, error = radius_payload(request)
     if error:
         return error
-    router = radius_router(data)
+    router = radius_router(data, request.network_node_id)
     status = attr(data, 'Acct-Status-Type')
     if router and status in {'Accounting-On', 'Accounting-Off', '7', '8'}:
         return HttpResponse(status=204)

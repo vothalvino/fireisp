@@ -8,7 +8,8 @@ from core.models import Organization
 from core.secrets import encrypt
 from network.models import ProvisioningJob, Router
 from network.routeros import fingerprint
-from network.services import build_plan, enqueue, process_job
+from network.execution import configured_node_id
+from network.services import build_plan, enqueue, process_job, retry_reviewed_job
 
 
 class Command(BaseCommand):
@@ -45,8 +46,8 @@ class Command(BaseCommand):
             organization = Organization.objects.get(pk=opts['organization_id']) if opts['organization_id'] else Organization.objects.filter(demo_mode=True).first()
             if not organization:
                 raise CommandError('Primero configure una organización de demostración.')
-            router, created = Router.objects.get_or_create(management_host=host, defaults={'organization': organization, 'name': data.get('name', 'CHR laboratorio'), 'username': username, 'password_encrypted': encrypt(password), 'ssh_port': data.get('port', 22), 'is_lab': True})
-            if not created and (router.username != username or router.organization_id != organization.pk):
+            router, created = Router.objects.get_or_create(management_host=host, defaults={'network_node_id': configured_node_id(), 'organization': organization, 'name': data.get('name', 'CHR laboratorio'), 'username': username, 'password_encrypted': encrypt(password), 'ssh_port': data.get('port', 22), 'is_lab': True})
+            if not created and (router.username != username or router.organization_id != organization.pk or router.network_node_id != configured_node_id()):
                 raise CommandError('El router existente tiene otra organización o cuenta; revise la interfaz.')
             self.run_job(enqueue(router, 'probe'))
             router.refresh_from_db()
@@ -82,9 +83,7 @@ class Command(BaseCommand):
             if not opts['source_job']:
                 raise CommandError('Indique --source-job con el trabajo fallido.')
             job = ProvisioningJob.objects.get(pk=opts['source_job'], router=router, status='failed')
-            job.status = 'pending'
-            job.save(update_fields=['status'])
-            self.run_job(job)
+            self.run_job(retry_reviewed_job(job))
         elif phase == 'rollback':
             if not opts['source_job']:
                 raise CommandError('Indique --source-job con el trabajo aprobado a revertir.')

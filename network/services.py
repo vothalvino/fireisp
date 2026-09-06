@@ -14,7 +14,8 @@ from django.db import transaction
 from core.secrets import decrypt, encrypt
 from core.services import audit
 from .agent_client import MAX_ENTITLEMENT_ENTRIES, AgentError, call_agent
-from .models import ProvisioningJob, RadiusCredential, RadiusSession
+from .models import NetworkNode, ProvisioningJob, RadiusCredential, RadiusSession, Router
+from .execution import NodeBusy, check_current_lease, configured_node_id, node_execution, require_local_router
 from .routeros import RouterError, RouterOS, probe_key, quote
 
 
@@ -42,7 +43,7 @@ def build_plan(router):
     if not router.is_lab:
         raise RouterError('Este aprovisionador inicial solo aplica laboratorios aislados; el descubrimiento está disponible para routers de producción.')
     cfg = addressing(router.pk)
-    endpoint = os.environ.get('NETWORK_PUBLIC_ENDPOINT', '')
+    endpoint = router.network_node.public_endpoint or (os.environ.get('NETWORK_PUBLIC_ENDPOINT', '') if router.network_node_id == 'primary' else '')
     try:
         ipaddress.IPv4Address(endpoint)
     except ValueError as exc:
@@ -54,7 +55,7 @@ def build_plan(router):
     original_ppp = router.snapshot.get('ppp_aaa', {})
     original_incoming = router.snapshot.get('radius_incoming', {})
     globals_changed = original_ppp.get('use-radius') != 'yes' or original_ppp.get('accounting') != 'yes' or original_incoming.get('accept') != 'yes'
-    return {'version': 1, 'snapshot_hash': router.snapshot_hash, 'router_id': router.pk, 'endpoint': endpoint, 'addressing': cfg, 'service_name': router.service_name, 'requires_global_approval': globals_changed, 'original_ppp_aaa': original_ppp, 'original_radius_incoming': original_incoming, 'changes': [f'Crear WireGuard {router.prefix}wg ({cfg["router"]}/30) con par exclusivo al servidor {cfg["server"]}.', f'Permitir UDP {cfg["router_port"]} solamente desde {endpoint}; permitir ICMP/GRE y desconexión RADIUS solo por el túnel privado.', f'Crear puente aislado {router.prefix}lab y EoIP sobre WireGuard; no agregar ether1 ni otros puertos existentes.', f'Crear perfil/pool propios y servicio PPPoE {router.service_name}; autenticación PAP/CHAP sobre el laboratorio aislado.', 'Agregar RADIUS exclusivo del servicio PPPoE nuevo, antes de los servidores anteriores; conservar sus secretos y ajustes.', 'Habilitar autenticación/contabilidad PPP y recepción de desconexiones solo si aún están desactivadas. Estos ajustes son globales.', 'Preparar WireGuard del servidor y cliente RADIUS mediante el agente restringido.'], 'untested': ['Sesión PPPoE real', 'Asignación de IP y velocidad', 'Contabilidad Start/Interim/Stop', 'Desconexión y reconexión']}
+    return {'version': 1, 'network_node_id': router.network_node_id, 'snapshot_hash': router.snapshot_hash, 'router_id': router.pk, 'endpoint': endpoint, 'addressing': cfg, 'service_name': router.service_name, 'requires_global_approval': globals_changed, 'original_ppp_aaa': original_ppp, 'original_radius_incoming': original_incoming, 'changes': [f'Crear WireGuard {router.prefix}wg ({cfg["router"]}/30) con par exclusivo al servidor {cfg["server"]}.', f'Permitir UDP {cfg["router_port"]} solamente desde {endpoint}; permitir ICMP/GRE y desconexión RADIUS solo por el túnel privado.', f'Crear puente aislado {router.prefix}lab y EoIP sobre WireGuard; no agregar ether1 ni otros puertos existentes.', f'Crear perfil/pool propios y servicio PPPoE {router.service_name}; autenticación PAP/CHAP sobre el laboratorio aislado.', 'Agregar RADIUS exclusivo del servicio PPPoE nuevo, antes de los servidores anteriores; conservar sus secretos y ajustes.', 'Habilitar autenticación/contabilidad PPP y recepción de desconexiones solo si aún están desactivadas. Estos ajustes son globales.', 'Preparar WireGuard del servidor y cliente RADIUS mediante el agente restringido.'], 'untested': ['Sesión PPPoE real', 'Asignación de IP y velocidad', 'Contabilidad Start/Interim/Stop', 'Desconexión y reconexión']}
 
 
 def enqueue(router, action, actor=None, plan=None, key=None):
@@ -70,17 +71,25 @@ def enqueue(router, action, actor=None, plan=None, key=None):
 
 
 def journal(job, step):
+    check_current_lease()
     job.journal = [*job.journal, step]
     job.save(update_fields=['journal'])
 
 
 def mark_readiness(router, **values):
+    check_current_lease()
     router.readiness = {**router.readiness, **values}
     router.save(update_fields=['readiness'])
 
 
 def apply_plan(job, api, agent=call_agent):
     router, plan = job.router, job.plan
+    require_local_router(router)
+    if plan.get('network_node_id', 'primary') != router.network_node_id:
+        raise RouterError('El plan pertenece a otro nodo; vuelva a descubrir y revisar la ubicación de red.')
+    endpoint = router.network_node.public_endpoint or (os.environ.get('NETWORK_PUBLIC_ENDPOINT', '') if router.network_node_id == 'primary' else '')
+    if plan.get('endpoint') != endpoint:
+        raise RouterError('El endpoint del nodo cambió; revise y apruebe un plan nuevo.')
     if not job.approved_at or plan.get('router_id') != router.pk:
         raise RouterError('Falta aprobación válida del plan.')
     if not job.journal:
@@ -282,19 +291,32 @@ def lab_test(job, api, agent=call_agent):
 
 
 def process_job(job, claimed=False):
-    if not claimed:
-        accepted = ProvisioningJob.objects.filter(pk=job.pk, status='pending').update(status='running', started_at=timezone.now())
-        if not accepted:
-            job.refresh_from_db()
-            return job
-    if job.status == 'succeeded':
-        return job
-    job.status = 'running'
-    job.started_at = timezone.now()
-    job.attempts += 1
-    job.error = ''
-    job.save(update_fields=['status', 'started_at', 'attempts', 'error'])
+    """Claim and execute under the node lock; callers cannot bypass ownership."""
+    require_local_router(job.router)
     try:
+        with node_execution() as lease:
+            with transaction.atomic():
+                accepted = ProvisioningJob.objects.select_for_update().filter(pk=job.pk, status='pending', router__execution_blocked=False).first()
+                if not accepted:
+                    job.refresh_from_db()
+                    return job
+                job.refresh_from_db()
+                job.status = 'running'
+                job.started_at = timezone.now()
+                job.attempts += 1
+                job.error = ''
+                job.worker_token = lease.token
+                job.worker_generation = lease.generation
+                job.save(update_fields=['status', 'started_at', 'attempts', 'error', 'worker_token', 'worker_generation'])
+            return _execute_job(job, lease)
+    except NodeBusy:
+        job.refresh_from_db()
+        return job
+
+
+def _execute_job(job, lease):
+    try:
+        lease.check()
         if job.action == 'probe':
             job.router.candidate_host_key = probe_key(job.router)
             job.router.save(update_fields=['candidate_host_key'])
@@ -322,6 +344,7 @@ def process_job(job, claimed=False):
                     result = disconnect_job(job, api)
                 else:
                     raise RouterError('Operación no admitida.')
+        lease.check()
         job.result = result
         job.status = 'succeeded'
     except Exception as exc:
@@ -329,9 +352,32 @@ def process_job(job, claimed=False):
         # Known errors are authored by our adapters; never persist raw SSH/HTTP/OS exceptions.
         from .agent_client import AgentError
         job.error = str(exc) if isinstance(exc, (RouterError, AgentError)) else 'La operación falló. Revise conectividad, servicios y permisos; el trabajo conserva su registro para reintento o reversión.'
+    # A superseded worker never commits a result under the replacement lease.
+    lease.check()
     job.finished_at = timezone.now()
-    job.save(update_fields=['status', 'result', 'error', 'finished_at'])
-    audit(job.actor, f'network.{job.action}.{job.status}', job.router, {'job': str(job.pk)})
+    updated = ProvisioningJob.objects.filter(pk=job.pk, status='running', worker_token=lease.token, worker_generation=lease.generation).update(status=job.status, result=job.result, error=job.error, finished_at=job.finished_at)
+    if not updated:
+        raise RouterError('La propiedad del trabajo cambió; conserve el resultado para revisión.')
+    audit(job.actor, f'network.{job.action}.{job.status}', job.router, {'job': str(job.pk), 'node_id': lease.node.pk})
+    return job
+
+
+@transaction.atomic
+def retry_reviewed_job(job, actor=None):
+    """Operator review is required after uncertain external effects."""
+    job = ProvisioningJob.objects.select_for_update().get(pk=job.pk)
+    if job.status != 'failed':
+        raise RouterError('Solo se puede reintentar un trabajo fallido.')
+    node = NetworkNode.objects.select_for_update().get(pk=job.router.network_node_id)
+    if node.worker_token and node.lease_expires_at and node.lease_expires_at > timezone.now():
+        raise RouterError('Espere a que termine la ejecución activa del nodo antes de reintentar.')
+    if job.router.jobs.filter(status='running').exists():
+        raise RouterError('Hay una ejecución pendiente de revisión para este router.')
+    job.status = 'pending'
+    job.worker_token = None
+    job.save(update_fields=['status', 'worker_token'])
+    Router.objects.filter(pk=job.router_id).update(execution_blocked=False)
+    audit(actor, 'network.job.retry', job.router, {'job': str(job.pk), 'reviewed_after_interruption': True})
     return job
 
 
@@ -380,10 +426,16 @@ def queue_plan_change(subscription_id, actor=None):
 
 
 def sync_confirmed_entitlements(agent=call_agent):
+    """Serialize whole-node snapshots with provisioning; nodes never share caches."""
+    with node_execution() as lease:
+        return _sync_confirmed_entitlements(agent, lease)
+
+
+def _sync_confirmed_entitlements(agent, lease):
     """Publish confirmed desired state; never derive automatic suspension from elapsed time."""
     entries = []
     now = timezone.now()
-    credentials = RadiusCredential.objects.filter(enabled=True, router__provisioned_at__isnull=False).select_related('router', 'subscription__plan', 'subscription__customer').order_by('pk')
+    credentials = RadiusCredential.objects.filter(enabled=True, router__provisioned_at__isnull=False, router__network_node_id=configured_node_id()).select_related('router', 'subscription__plan', 'subscription__customer').order_by('pk')
     for credential in credentials.iterator(chunk_size=500):
         if credential.expires_at and credential.expires_at <= now:
             continue
@@ -398,7 +450,10 @@ def sync_confirmed_entitlements(agent=call_agent):
             raise AgentError('La instantánea excede el límite de abonados; se conserva la anterior.')
         entries.append({'username': credential.username, 'password': decrypt(credential.password_encrypted), 'router_id': credential.router_id, 'upload_mbps': upload, 'download_mbps': download, 'expires_at': credential.expires_at.isoformat() if credential.expires_at else None})
     # The agent writes one atomic complete snapshot. On failure the previous generation remains.
-    return agent('sync_entitlements', 1, entries=entries)
+    lease.check()
+    result = agent('sync_entitlements', 1, entries=entries)
+    lease.check()
+    return {**result, 'network_node_id': lease.node.pk, 'generation': lease.generation}
 
 
 def disconnect_job(job, api, agent=call_agent):

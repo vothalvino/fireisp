@@ -18,6 +18,12 @@ def encode_request(operation, router_id, **payload):
 
 
 def call_agent(operation, router_id, **payload):
+    from .execution import check_current_lease, configured_node_id, current_lease
+    if current_lease() and operation != 'sync_entitlements':
+        from .models import Router
+        if not Router.objects.filter(pk=router_id, network_node_id=configured_node_id()).exists():
+            raise AgentError('El agente local no puede operar routers de otro nodo.')
+    check_current_lease()
     request = encode_request(operation, router_id, **payload)
     path = os.environ.get('NETWORK_AGENT_SOCKET', '/run/fireisp-network/agent.sock')
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
@@ -41,4 +47,5 @@ def call_agent(operation, router_id, **payload):
         raise AgentError('Respuesta inválida del agente de red.') from exc
     if not data.get('ok'):
         raise AgentError(data.get('error', 'El agente rechazó la operación.'))
+    check_current_lease()
     return data.get('result', {})

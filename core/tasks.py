@@ -9,8 +9,9 @@ def deliver_outbox():
     count = 0
     for event_id in OutboxEvent.objects.filter(delivered_at__isnull=True, available_at__lte=timezone.now(), attempts__lt=5).values_list('pk', flat=True)[:100]:
         with transaction.atomic():
-            event = OutboxEvent.objects.select_for_update().get(pk=event_id)
-            if event.delivered_at: continue
+            event = OutboxEvent.objects.select_for_update(skip_locked=True).filter(pk=event_id).first()
+            if event is None: continue
+            if event.delivered_at or event.available_at > timezone.now() or event.attempts >= 5: continue
             event.attempts += 1
             try:
                 with transaction.atomic():

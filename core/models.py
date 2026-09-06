@@ -137,3 +137,22 @@ class HealthCheck(models.Model):
     status = models.CharField(max_length=20)
     details = models.JSONField(default=dict)
     checked_at = models.DateTimeField(auto_now=True)
+
+
+class DeploymentState(models.Model):
+    singleton = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    release = models.CharField(max_length=64)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class RuntimeNode(models.Model):
+    identifier = models.CharField(max_length=160, unique=True)
+    role = models.CharField(max_length=20)
+    release = models.CharField(max_length=64)
+    hostname = models.CharField(max_length=120)
+    status = models.CharField(max_length=20, default='ready')
+    started_at = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['role', 'identifier']

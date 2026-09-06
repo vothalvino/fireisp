@@ -1,0 +1,1 @@
+{% for job in jobs|slice:':5' %}<p role="status"><strong>{{ job.get_operation_display }}: {{ job.get_status_display }}</strong>{% if job.message %} · {{ job.message }}{% elif job.status == 'queued' or job.status == 'running' %} · Tu solicitud está registrada. Actualiza la página para consultar el resultado.{% endif %}</p>{% endfor %}

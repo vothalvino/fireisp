@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
@@ -15,12 +16,54 @@ from core.secrets import encrypt,decrypt
 from core.services import audit
 from core.models import Customer
 from billing.models import Invoice
-from .models import FiscalDocument,FiscalProfile,FiscalAttempt,GlobalBatch,GlobalItem
+from .models import FiscalDocument,FiscalProfile,FiscalAttempt,GlobalBatch,GlobalItem,FiscalJob
 
 DEMO_HOST = 'https://demo-facturacion.finkok.com'
 SOAP = 'http://schemas.xmlsoap.org/soap/envelope/'
 APP = 'apps.services.soap.core.views'
 PAYMENT_FORMS = {'cash':'01','transfer':'03','card':'04'}
+MAX_XML_BYTES = 2 * 1024 * 1024
+
+
+class StaleFiscalClaim(ValidationError):
+    pass
+
+
+@contextmanager
+def claim_transaction(claim=None):
+    """Fence document writes from a worker whose lease was replaced or expired.
+
+    Lock ordering is always job then document, matching lease recovery. Direct
+    management commands omit the claim and retain their existing transactions.
+    """
+    with transaction.atomic():
+        if claim is not None:
+            current=FiscalJob.objects.select_for_update().filter(pk=claim.pk).first()
+            if (not current or current.status!='running' or current.claim_token!=claim.claim_token
+                    or not current.lease_until or current.lease_until<=timezone.now()):
+                raise StaleFiscalClaim('La operación ya pertenece a otra ejecución; consulta su resultado actual.')
+        yield
+
+
+def bounded_xml(value):
+    if len(value.encode() if isinstance(value, str) else value) > MAX_XML_BYTES:
+        raise ValidationError('El XML excede el tamaño permitido de 2 MiB.')
+    return value
+
+
+def _response_xml(response):
+    try:
+        response.raise_for_status()
+        chunks = []
+        size = 0
+        for chunk in response.iter_content(chunk_size=65536):
+            size += len(chunk)
+            if size > MAX_XML_BYTES:
+                raise ValidationError('La respuesta fiscal excede el tamaño permitido.')
+            chunks.append(chunk)
+        return etree.fromstring(b''.join(chunks), etree.XMLParser(resolve_entities=False, no_network=True))
+    finally:
+        response.close()
 
 
 def document_organization(document):
@@ -62,16 +105,14 @@ def soap_call(profile,service,method,fields):
         else:
             element.text=str(value)
     response=requests.post(f'{DEMO_HOST}/servicios/soap/{service}',data=etree.tostring(root),
-        headers={'Content-Type':'text/xml; charset=utf-8','SOAPAction':method},timeout=(10,45))
-    response.raise_for_status()
-    parser=etree.XMLParser(resolve_entities=False,no_network=True)
-    result=etree.fromstring(response.content,parser)
+        headers={'Content-Type':'text/xml; charset=utf-8','SOAPAction':method},timeout=(10,45),stream=True)
+    result=_response_xml(response)
     if result.find(f'.//{{{SOAP}}}Fault') is not None:
         raise ValidationError('El PAC devolvió una falla SOAP.')
     return result
 
 
-def verify_credentials(profile,actor=None):
+def verify_credentials(profile,actor=None,claim=None):
     profile=_profile(profile.organization)
     try:
         result=soap_call(profile,'registration','get',{'reseller_username':decrypt(profile.username_encrypted),
@@ -86,13 +127,21 @@ def verify_credentials(profile,actor=None):
             status='No fue posible verificar el emisor. '+_safe_error(ValidationError(message or 'RFC sin registro o sin acceso.'),profile)
             profile.verified_at=None
         profile.verification_status=status[:300]
-        profile.save(update_fields=['verified_at','verification_status','updated_at'])
-        audit(actor,'fiscal.connection.verified',profile.pk,{'verified':matched})
+        with claim_transaction(claim):
+            saved=FiscalProfile.objects.filter(pk=profile.pk,updated_at=profile.updated_at).update(
+                verified_at=profile.verified_at,verification_status=profile.verification_status,updated_at=timezone.now())
+            if not saved:
+                raise StaleFiscalClaim('La configuración cambió durante la consulta. Solicita otra verificación.')
+            audit(actor,'fiscal.connection.verified',profile.pk,{'verified':matched})
         return matched,status
+    except StaleFiscalClaim:
+        raise
     except Exception as exc:
         profile.verified_at=None
         profile.verification_status=_safe_error(exc,profile)[:300]
-        profile.save(update_fields=['verified_at','verification_status','updated_at'])
+        with claim_transaction(claim):
+            FiscalProfile.objects.filter(pk=profile.pk,updated_at=profile.updated_at).update(
+                verified_at=profile.verified_at,verification_status=profile.verification_status,updated_at=timezone.now())
         raise ValidationError(profile.verification_status) from None
 
 
@@ -139,9 +188,8 @@ def pac(profile):
         def _perform_request(self,url,envelope):
             if not url.startswith(DEMO_HOST+'/servicios/soap/'):
                 raise ValidationError('Destino fiscal fuera del ambiente DEMO.')
-            response=requests.post(url,data=etree.tostring(envelope),headers={'Content-Type':'text/xml; charset=utf-8'},timeout=(10,60))
-            response.raise_for_status()
-            root=etree.fromstring(response.content,etree.XMLParser(resolve_entities=False,no_network=True))
+            response=requests.post(url,data=etree.tostring(envelope),headers={'Content-Type':'text/xml; charset=utf-8'},timeout=(10,60),stream=True)
+            root=_response_xml(response)
             if root.find(f'.//{{{SOAP}}}Fault') is not None:
                 raise ValidationError('El PAC devolvió una falla SOAP.')
             return root
@@ -237,7 +285,7 @@ def _build_cfdi(document,profile):
 
 
 @transaction.atomic
-def prepare_document(invoice,actor=None,method='PPD',payment_form='99',allocation=None):
+def prepare_document(invoice,actor=None,method='PPD',payment_form='99',allocation=None,defer_build=False):
     invoice=Invoice.objects.select_for_update(of=("self",)).select_related('customer__organization').get(pk=invoice.pk)
     if invoice.status=='void':
         raise ValidationError('No se puede facturar una mensualidad anulada.')
@@ -254,10 +302,14 @@ def prepare_document(invoice,actor=None,method='PPD',payment_form='99',allocatio
         document,_=FiscalDocument.objects.get_or_create(allocation=allocation,defaults={'invoice':invoice,'kind':'payment','payment_method':'PPD'})
     else:
         document,_=FiscalDocument.objects.get_or_create(invoice=invoice,kind='income',defaults={'payment_method':method,'payment_form':payment_form})
+    if defer_build and document.jobs.filter(status__in=['queued','running']).exists():
+        if not allocation and (document.payment_method,document.payment_form)!=(method,payment_form):
+            raise ValidationError('Espera el resultado de la solicitud pendiente antes de cambiar sus datos fiscales.')
+        return document
     if not document.request_xml or document.status=='error':
         document.payment_method=method if not allocation else 'PPD'
         document.payment_form=payment_form
-        document.request_xml=_build_cfdi(document,profile).xml_bytes().decode()
+        document.request_xml='' if defer_build else bounded_xml(_build_cfdi(document,profile).xml_bytes()).decode()
         document.status='draft'
         document.error=''
         document.save(update_fields=['payment_method','payment_form','request_xml','status','error'])
@@ -268,10 +320,10 @@ def prepare_document(invoice,actor=None,method='PPD',payment_form='99',allocatio
     return document
 
 
-def stamp_document(document,actor=None,recover=False):
+def stamp_document(document,actor=None,recover=False,claim=None):
     from satcfdi.cfdi import CFDI
     from satcfdi.exceptions import ResponseError
-    with transaction.atomic():
+    with claim_transaction(claim):
         document=FiscalDocument.objects.select_for_update(of=('self',)).select_related('invoice__customer__organization').get(pk=document.pk)
         if document.status in {'stamped','cancelled','cancel_pending'}:
             return document
@@ -285,13 +337,13 @@ def stamp_document(document,actor=None,recover=False):
         document.save(update_fields=['status','error'])
     try:
         client=pac(profile)
-        cfdi=CFDI.from_string(document.request_xml.encode())
+        cfdi=CFDI.from_string(bounded_xml(document.request_xml.encode()))
         result=client.stamped(cfdi) if recover else client.stamp(cfdi)
-        returned=CFDI.from_string(result.xml)
+        returned=CFDI.from_string(bounded_xml(result.xml))
         stamped_uuid=returned['Complemento']['TimbreFiscalDigital']['UUID']
         if str(stamped_uuid).upper()!=str(result.document_id).upper():
             raise ValidationError('UUID inconsistente en respuesta del PAC.')
-        with transaction.atomic():
+        with claim_transaction(claim):
             document=FiscalDocument.objects.select_for_update().get(pk=document.pk)
             document.xml=result.xml.decode()
             document.uuid=str(stamped_uuid)
@@ -301,18 +353,21 @@ def stamp_document(document,actor=None,recover=False):
             document.save(update_fields=['xml','uuid','status','stamped_at','error'])
             audit(actor,'fiscal.document.stamped',document.pk,{'uuid':document.uuid,'environment':'demo','recovered':recover})
         return document
+    except StaleFiscalClaim:
+        raise
     except Exception as exc:
         # Transport ambiguity never triggers an automatic second stamp.
         status='error' if isinstance(exc,ResponseError) and not recover else 'uncertain'
-        FiscalAttempt.objects.create(document=document,request_xml=document.request_xml,outcome=status,error=_safe_error(exc,profile))
-        FiscalDocument.objects.filter(pk=document.pk).update(status=status,error=_safe_error(exc,profile))
+        with claim_transaction(claim):
+            FiscalAttempt.objects.create(document=document,request_xml=document.request_xml,outcome=status,error=_safe_error(exc,profile))
+            FiscalDocument.objects.filter(pk=document.pk).update(status=status,error=_safe_error(exc,profile))
         raise ValidationError(_safe_error(exc,profile)) from None
 
 
-def cancel_document(document,actor,reason='02',replacement=''):
+def cancel_document(document,actor,reason='02',replacement='',claim=None):
     if reason not in {'01','02','03','04'} or (reason=='01' and not replacement):
         raise ValidationError('Motivo inválido; el motivo 01 requiere UUID sustituto.')
-    with transaction.atomic():
+    with claim_transaction(claim):
         document=FiscalDocument.objects.select_for_update(of=('self',)).select_related('invoice__customer__organization').get(pk=document.pk)
         if document.status in {'cancelled','cancel_pending'}:
             return document
@@ -332,22 +387,26 @@ def cancel_document(document,actor,reason='02',replacement=''):
         from satcfdi.cfdi import CFDI
         from satcfdi.pacs import CancelReason
         acknowledgement=pac(profile).cancel(CFDI.from_string(document.xml.encode()),CancelReason(reason),replacement or None,signer=signer)
-        document.cancellation_xml=(acknowledgement.acuse or b'').decode()
-        document.cancellation_code=str(acknowledgement.code or '')
-        document.error=''
-        document.save(update_fields=['cancellation_xml','cancellation_code','error'])
-        audit(actor,'fiscal.cancellation.requested',document.pk,{'uuid':document.uuid,'code':document.cancellation_code,'reason':reason})
+        with claim_transaction(claim):
+            document.cancellation_xml=(acknowledgement.acuse or b'').decode()
+            document.cancellation_code=str(acknowledgement.code or '')
+            document.error=''
+            document.save(update_fields=['cancellation_xml','cancellation_code','error'])
+            audit(actor,'fiscal.cancellation.requested',document.pk,{'uuid':document.uuid,'code':document.cancellation_code,'reason':reason})
         return document
+    except StaleFiscalClaim:
+        raise
     except Exception as exc:
         from satcfdi.exceptions import ResponseError
         updates={'error':_safe_error(exc,profile)}
         if isinstance(exc,ResponseError):
             updates['status']='stamped'
-        FiscalDocument.objects.filter(pk=document.pk).update(**updates)
+        with claim_transaction(claim):
+            FiscalDocument.objects.filter(pk=document.pk).update(**updates)
         raise ValidationError(_safe_error(exc,profile)) from None
 
 
-def refresh_cancellation(document,actor=None):
+def refresh_cancellation(document,actor=None,claim=None):
     from satcfdi.cfdi import CFDI
     profile=_profile(document_organization(document))
     cfdi=CFDI.from_string(document.xml.encode())
@@ -355,21 +414,24 @@ def refresh_cancellation(document,actor=None):
         'taxpayer_id':profile.issuer_rfc,'rtaxpayer_id':cfdi['Receptor']['Rfc'],'uuid':document.uuid,'total':str(cfdi['Total'])})
     state=result.findtext(f'.//{{{APP}}}Estado') or ''
     if state.lower()=='cancelado':
-        document.status='cancelled'
-        document.error=''
-        document.save(update_fields=['status','error'])
-        audit(actor,'fiscal.cancellation.confirmed',document.pk,{'uuid':document.uuid})
+        with claim_transaction(claim):
+            document.status='cancelled'
+            document.error=''
+            document.save(update_fields=['status','error'])
+            audit(actor,'fiscal.cancellation.confirmed',document.pk,{'uuid':document.uuid})
     return state or 'Sin estado confirmado'
 
 
 @transaction.atomic
-def prepare_credit_document(memo,actor=None):
+def prepare_credit_document(memo,actor=None,defer_build=False):
     Customer.objects.select_for_update().get(pk=memo.invoice.customer_id)
     invoice=Invoice.objects.select_for_update().get(pk=memo.invoice_id)
     profile=_profile(invoice.customer.organization)
     document,_=FiscalDocument.objects.get_or_create(credit_memo=memo,defaults={'invoice':invoice,'kind':'credit','payment_method':'PUE','payment_form':'15'})
+    if defer_build and document.jobs.filter(status__in=['queued','running']).exists():
+        return document
     if not document.request_xml or document.status=='error':
-        document.request_xml=_build_cfdi(document,profile).xml_bytes().decode()
+        document.request_xml='' if defer_build else bounded_xml(_build_cfdi(document,profile).xml_bytes()).decode()
         document.status='draft'
         document.error=''
         document.save(update_fields=['request_xml','status','error'])
@@ -378,7 +440,7 @@ def prepare_credit_document(memo,actor=None):
 
 
 @transaction.atomic
-def prepare_global(organization,invoices,period_start,period_end,periodicity,payment_form,idempotency_key,actor=None):
+def prepare_global(organization,invoices,period_start,period_end,periodicity,payment_form,idempotency_key,actor=None,defer_build=False):
     ids=sorted({int(i.pk if hasattr(i,'pk') else i) for i in invoices})
     if not ids or len(ids)>500 or period_start>period_end or period_start.month!=period_end.month or period_start.year!=period_end.year:
         raise ValidationError('Selecciona entre 1 y 500 operaciones del mismo mes y un periodo válido.')
@@ -414,7 +476,7 @@ def prepare_global(organization,invoices,period_start,period_end,periodicity,pay
     batch=GlobalBatch.objects.create(organization=organization,period_start=period_start,period_end=period_end,periodicity=periodicity,idempotency_key=idempotency_key)
     GlobalItem.objects.bulk_create([GlobalItem(batch=batch,invoice=invoice) for invoice in selected])
     document=FiscalDocument.objects.create(global_batch=batch,kind='global',payment_method='PUE',payment_form=payment_form)
-    document.request_xml=_build_cfdi(document,profile).xml_bytes().decode()
+    document.request_xml='' if defer_build else bounded_xml(_build_cfdi(document,profile).xml_bytes()).decode()
     document.save(update_fields=['request_xml'])
     audit(actor,'fiscal.global.prepared',document.pk,{'invoice_ids':ids,'count':len(ids),'environment':'demo'})
     return document

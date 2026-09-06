@@ -1,4 +1,8 @@
 FROM python:3.12-slim-bookworm
+ARG FIREISP_RELEASE=development
+ENV FIREISP_RELEASE=$FIREISP_RELEASE
+LABEL io.fireisp.release=$FIREISP_RELEASE
+LABEL org.opencontainers.image.revision=$FIREISP_RELEASE
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 RUN apt-get update && apt-get install -y --no-install-recommends libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 fonts-dejavu-core ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
