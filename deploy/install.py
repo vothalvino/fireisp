@@ -324,6 +324,11 @@ def main():
     caddy_build = subprocess.check_output(compose + ['run', '--rm', '--no-deps', 'caddy', 'caddy', 'build-info'], text=True)
     run(sys.executable, str(options.source / 'deploy/check_caddy.py'), input=caddy_build, text=True)
     run(*compose, 'run', '--rm', '--no-deps', 'caddy', 'caddy', 'validate', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile')
+    # Validate the root setup command under the real container restrictions
+    # before stopping any running workers or changing the database release.
+    run(*compose, 'run', '--rm', '--no-deps', '--user', '0', 'web', 'python', '-c',
+        "from pathlib import Path; Path('/app/manage.py').read_text(); "
+        "import core.management.commands.bootstrap")
     current_db = subprocess.check_output(compose + ['ps', '--status', 'running', '-q', 'db'], text=True).strip()
     if current_db:
         run(*compose, 'run', '--rm', '--no-deps', 'web', 'python', '-c',

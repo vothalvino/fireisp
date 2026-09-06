@@ -3,4 +3,5 @@ ARG FIREISP_RELEASE=development
 LABEL org.opencontainers.image.revision=$FIREISP_RELEASE
 RUN apt-get update && apt-get install -y --no-install-recommends python3 wireguard-tools iproute2 iputils-ping iptables ppp && rm -rf /var/lib/apt/lists/*
 COPY deploy/network/agent.py deploy/network/eoip.py /opt/fireisp-network/
+RUN chmod -R a+rX /opt/fireisp-network
 ENTRYPOINT ["python3", "/opt/fireisp-network/agent.py"]

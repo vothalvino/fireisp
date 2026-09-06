@@ -3,6 +3,24 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
+  installer-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build with the one-line installer's private checkout permissions
+        shell: bash
+        run: |
+          chmod -R go-rwx,a-w .
+          docker build --tag fireisp:installer-check .
+      - name: Verify application access for setup and workers with capabilities dropped
+        shell: bash
+        run: |
+          for uid in 0:0 1000:1000; do
+            docker run --rm --user "$uid" --cap-drop ALL --read-only --network none fireisp:installer-check python -c "from pathlib import Path; Path('/app/manage.py').read_text(); import core.management.commands.bootstrap"
+          done
+      - name: Restore checkout permissions for runner cleanup
+        if: always()
+        run: chmod -R u+w .
   caddy-security:
     runs-on: ubuntu-latest
     steps:
