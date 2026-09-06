@@ -123,7 +123,7 @@ services:
     stop_grace_period: 15s
     depends_on:
       redis: {condition: service_healthy}
-    mem_limit: 160m
+    mem_limit: 256m
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   network-worker:
