@@ -1,8 +1,10 @@
 import base64
 import copy
 import json
+import os
 from pathlib import Path
 import socket
+import stat
 import subprocess
 import tempfile
 from unittest.mock import Mock, patch
@@ -127,6 +129,56 @@ class ConnectionTests(SimpleTestCase):
         self.assertIn('GlobalKnownHostsFile=/dev/null', command)
         self.assertEqual(command[1:3], ['-F', '/dev/null'])
         self.assertNotIn('StrictHostKeyChecking=accept-new', command)
+
+    def test_root_enrollment_accepts_only_its_invoking_sudo_operator_key(self):
+        key = self.directory / 'operator-key'
+        key.write_text('synthetic-key-never-executed')
+        key.chmod(0o600)
+        metadata = Mock(st_uid=1001, st_mode=stat.S_IFREG | 0o600, st_size=100)
+        with patch.object(connection.os, 'getuid', return_value=0), \
+                patch.object(connection.os, 'geteuid', return_value=0), \
+                patch.dict(os.environ, {'SUDO_UID': '1001'}), \
+                patch.object(Path, 'lstat', return_value=metadata), \
+                patch.object(connection.subprocess, 'run', return_value=Mock(stdout=json.dumps(self.manifest))) as run:
+            connection.request_enrollment('main.test', 22, 'root', key, self.directory / 'known_hosts', {})
+            self.assertIn(str(key), run.call_args.args[0])
+            metadata.st_uid = 1002
+            with self.assertRaises(ValueError):
+                connection.request_enrollment('main.test', 22, 'root', key, self.directory / 'known_hosts', {})
+            metadata.st_uid = 1001
+            metadata.st_mode = stat.S_IFREG | 0o640
+            with self.assertRaises(ValueError):
+                connection.request_enrollment('main.test', 22, 'root', key, self.directory / 'known_hosts', {})
+            # Generated keys and state never inherit the administrator exception.
+            metadata.st_mode = stat.S_IFREG | 0o600
+            with self.assertRaises(ValueError):
+                connection.private_file(key)
+
+    def test_invalid_or_nonroot_sudo_identity_cannot_widen_admin_key_ownership(self):
+        metadata = Mock(st_uid=1001, st_mode=stat.S_IFREG | 0o600, st_size=100)
+        with patch.object(Path, 'lstat', return_value=metadata), \
+                patch.object(connection.os, 'geteuid', return_value=0), \
+                patch.object(connection.os, 'getuid', return_value=0), \
+                patch.object(connection.subprocess, 'run') as run:
+            for sudo_uid in ('', '-1', '0', '1e3', '1001\n', '4294967295', '99999999999999999'):
+                with self.subTest(sudo_uid=sudo_uid), patch.dict(os.environ, {'SUDO_UID': sudo_uid}), \
+                        self.assertRaises(ValueError):
+                    connection.request_enrollment('main.test', 22, 'root', self.directory / 'key',
+                                                  self.directory / 'known_hosts', {})
+            with patch.object(connection.os, 'getuid', return_value=1000), \
+                    patch.dict(os.environ, {'SUDO_UID': '1001'}), self.assertRaises(ValueError):
+                connection.request_enrollment('main.test', 22, 'root', self.directory / 'key',
+                                              self.directory / 'known_hosts', {})
+        run.assert_not_called()
+
+    def test_selected_administrator_key_cannot_be_a_symlink(self):
+        key = self.directory / 'administrator-key'
+        connection.write_private(key, 'synthetic-key-never-executed')
+        link = self.directory / 'key-link'
+        link.symlink_to(key)
+        with patch.object(connection.subprocess, 'run') as run, self.assertRaises(ValueError):
+            connection.request_enrollment('main.test', 22, 'root', link, self.directory / 'known_hosts', {})
+        run.assert_not_called()
 
     def test_tunnel_service_uses_only_loopback_and_fail_closed_pinned_identity(self):
         unit = connection.tunnel_unit('main.test', 2222, 'north', self.directory, connection.PREFERRED_PORTS)

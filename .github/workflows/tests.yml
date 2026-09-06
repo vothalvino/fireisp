@@ -16,7 +16,7 @@ jobs:
         shell: bash
         run: |
           for uid in 0:0 1000:1000; do
-            docker run --rm --user "$uid" --cap-drop ALL --read-only --network none fireisp:installer-check python -c "from pathlib import Path; Path('/app/manage.py').read_text(); import core.management.commands.bootstrap"
+            docker run --rm --user "$uid" --cap-drop ALL --read-only --network none --env DEBUG=true fireisp:installer-check python manage.py bootstrap --help
           done
       - name: Restore checkout permissions for runner cleanup
         if: always()

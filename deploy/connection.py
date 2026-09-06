@@ -73,9 +73,10 @@ def private_directory(path):
     path.chmod(0o700)
 
 
-def private_file(path, *, maximum=131072):
+def private_file(path, *, maximum=131072, owners=None):
     metadata = path.lstat()
-    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
+    allowed_owners = {os.geteuid()} if owners is None else owners
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid not in allowed_owners
             or metadata.st_mode & 0o077 or metadata.st_size > maximum):
         raise ValueError('A connection file must be a regular owner-only file; check ownership and chmod 600.')
 
@@ -161,8 +162,16 @@ def ssh_options(known_hosts, ssh_port, *, interactive):
 def request_enrollment(main_host, ssh_port, admin_user, admin_key, known_hosts, payload, *, interactive=True):
     command = ['/usr/bin/ssh', *ssh_options(known_hosts, ssh_port, interactive=interactive)]
     if admin_key:
-        admin_key = Path(admin_key).expanduser().resolve(strict=True)
-        private_file(admin_key, maximum=65536)
+        # sudo installers may use their invoking operator's private key. This
+        # exception applies only to that explicitly selected authentication key;
+        # generated link keys and connection state remain installer-owned.
+        owners = {os.geteuid()}
+        sudo_uid = os.environ.get('SUDO_UID', '')
+        if (os.getuid() == 0 and os.geteuid() == 0 and re.fullmatch(r'[1-9][0-9]{0,9}', sudo_uid)
+                and int(sudo_uid) < 2 ** 32 - 1):
+            owners.add(int(sudo_uid))
+        admin_key = Path(admin_key).expanduser().absolute()
+        private_file(admin_key, maximum=65536, owners=owners)
         command += ['-i', str(admin_key), '-o', 'IdentitiesOnly=yes']
     remote = ['python3', '/opt/fireisp/app/deploy/pairing.py', 'prepare']
     if admin_user != 'root':
