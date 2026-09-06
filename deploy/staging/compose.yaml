@@ -3,6 +3,8 @@ name: fireisp-staging
 services:
   db:
     image: postgres:17-bookworm
+    ports:
+      - '127.0.0.1:15432:5432'
     restart: unless-stopped
     environment:
       POSTGRES_DB: postgres
@@ -22,6 +24,8 @@ services:
     command: [postgres, -c, shared_buffers=256MB, -c, max_connections=80]
   redis:
     image: valkey/valkey:8-alpine
+    ports:
+      - '127.0.0.1:16379:6379'
     restart: unless-stopped
     command: [valkey-server, --appendonly, 'yes', --maxmemory, 96mb, --maxmemory-policy, noeviction]
     volumes:

@@ -35,7 +35,8 @@ def supported_ubuntu(contents):
 
 def release_identity(source, explicit=None):
     if (source / '.git').exists():
-        if subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain'], text=True).strip():
+        if subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain'], text=True,
+                                   env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}).strip():
             raise ValueError('Commit or discard source changes before installing a release.')
         release = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
         if explicit and explicit != release:
@@ -116,7 +117,7 @@ def active_remote_executors(nodes, now):
                    and node['last_seen'] >= cutoff})
 
 
-def require_remote_executors_drained():
+def require_remote_executors_drained(allow_release=None):
     # Invoked inside the newly built web image BEFORE migrations. The first
     # upgrade from an older release does not yet have the runtime registry table.
     from django.db import connection
@@ -124,6 +125,14 @@ def require_remote_executors_drained():
     from core.models import RuntimeNode
     if RuntimeNode._meta.db_table not in connection.introspection.table_names():
         return
+    if allow_release:
+        from core.models import DeploymentState
+        from django.db.migrations.executor import MigrationExecutor
+        if DeploymentState.objects.filter(pk=1).values_list('release', flat=True).first() == allow_release:
+            executor = MigrationExecutor(connection)
+            if not executor.migration_plan(executor.loader.graph.leaf_nodes()):
+                # Placement-only reruns keep compatible remote workers available.
+                return
     now = timezone.now()
     nodes = RuntimeNode.objects.filter(last_seen__gte=now - timedelta(seconds=90)).values(
         'identifier', 'role', 'status', 'last_seen')
@@ -221,6 +230,26 @@ def wait_for_https_health(hostname, attempts=24, interval=5, request_timeout=10)
             time.sleep(interval)
     raise RuntimeError(f'HTTPS health verification failed for {url} after {attempts} checks ({last_failure}). Verify DNS A/AAAA records, provider inbound TCP 80/443, and the Caddy/web service logs. Fix the reported prerequisite and rerun the installer; existing credentials remain preserved.')
 
+def ensure_docker():
+    """Install the container runtime shared by main and additional-node installers."""
+    compose_available = bool(shutil.which('docker')) and subprocess.run(['docker', 'compose', 'version'], capture_output=True).returncode == 0
+    if not compose_available:
+        run('apt-get', 'update')
+        run('apt-get', 'install', '-y', 'ca-certificates', 'curl', 'gnupg')
+        Path('/etc/apt/keyrings').mkdir(exist_ok=True, mode=0o755)
+        run('curl', '-fsSL', 'https://download.docker.com/linux/ubuntu/gpg', '-o', '/etc/apt/keyrings/docker.asc')
+        os.chmod('/etc/apt/keyrings/docker.asc', 0o644)
+        arch = subprocess.check_output(['dpkg', '--print-architecture'], text=True).strip()
+        Path('/etc/apt/sources.list.d/docker.sources').write_text(f'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble\nComponents: stable\nArchitectures: {arch}\nSigned-By: /etc/apt/keyrings/docker.asc\n')
+        run('apt-get', 'update')
+        run('apt-get', 'install', '-y', 'docker-ce', 'docker-ce-cli', 'containerd.io', 'docker-buildx-plugin', 'docker-compose-plugin')
+    run('systemctl', 'enable', '--now', 'docker')
+    run('docker', 'compose', 'version')
+    version = subprocess.check_output(['docker', 'version', '--format', '{{.Server.Version}}'], text=True).strip()
+    if not re.match(r'^[0-9]+\.', version) or int(version.split('.')[0]) < 28:
+        raise RuntimeError('Docker Engine 28 or newer is required before publishing private loopback services. Upgrade Docker and rerun.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--hostname', required=True)
@@ -253,19 +282,7 @@ def main():
         parser.error(str(exc))
     for warning in dns['warnings'] + memory_preflight():
         print('Preflight: ' + warning, file=sys.stderr)
-    compose_available = bool(shutil.which('docker')) and subprocess.run(['docker', 'compose', 'version'], capture_output=True).returncode == 0
-    if not compose_available:
-        run('apt-get', 'update')
-        run('apt-get', 'install', '-y', 'ca-certificates', 'curl', 'gnupg')
-        Path('/etc/apt/keyrings').mkdir(exist_ok=True, mode=0o755)
-        run('curl', '-fsSL', 'https://download.docker.com/linux/ubuntu/gpg', '-o', '/etc/apt/keyrings/docker.asc')
-        os.chmod('/etc/apt/keyrings/docker.asc', 0o644)
-        arch = subprocess.check_output(['dpkg', '--print-architecture'], text=True).strip()
-        Path('/etc/apt/sources.list.d/docker.sources').write_text(f'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble\nComponents: stable\nArchitectures: {arch}\nSigned-By: /etc/apt/keyrings/docker.asc\n')
-        run('apt-get', 'update')
-        run('apt-get', 'install', '-y', 'docker-ce', 'docker-ce-cli', 'containerd.io', 'docker-buildx-plugin', 'docker-compose-plugin')
-    run('systemctl', 'enable', '--now', 'docker')
-    run('docker', 'compose', 'version')
+    ensure_docker()
     if not shutil.which('age'):
         run('apt-get', 'update')
         run('apt-get', 'install', '-y', 'age')
@@ -298,12 +315,22 @@ def main():
         source = options.source / 'deploy' / 'staging' / filename
         destination = staging / filename
         if source.resolve() != destination.resolve(): shutil.copyfile(source, destination)
+        # Bootstrap uses umask 077. PostgreSQL drops to its own UID before
+        # reading init scripts; these templates contain no embedded credentials.
+        destination.chmod(0o644)
     compose = ['docker', 'compose', '--project-directory', str(staging), '-f', str(staging / 'compose.yaml')]
     run(*compose, 'config', '--quiet')
     run(*compose, 'build', '--pull')
     caddy_build = subprocess.check_output(compose + ['run', '--rm', '--no-deps', 'caddy', 'caddy', 'build-info'], text=True)
     run(sys.executable, str(options.source / 'deploy/check_caddy.py'), input=caddy_build, text=True)
     run(*compose, 'run', '--rm', '--no-deps', 'caddy', 'caddy', 'validate', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile')
+    current_db = subprocess.check_output(compose + ['ps', '--status', 'running', '-q', 'db'], text=True).strip()
+    if current_db:
+        run(*compose, 'run', '--rm', '--no-deps', 'web', 'python', '-c',
+            "import os; os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'fireisp.settings'); "
+            "import django; django.setup(); from deploy.install import require_remote_executors_drained; "
+            f"require_remote_executors_drained(allow_release={release!r})")
+    drain_local_executors(compose, effective_profiles)
     run(*compose, 'up', '-d', 'db', 'redis')
     for attempt in range(45):
         status = subprocess.run(compose + ['exec', '-T', 'db', 'pg_isready', '-U', 'postgres'], capture_output=True)
@@ -313,10 +340,7 @@ def main():
     run(*compose, 'run', '--rm', '--no-deps', 'web', 'python', '-c',
         "import os; os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'fireisp.settings'); "
         "import django; django.setup(); from deploy.install import require_remote_executors_drained; "
-        "require_remote_executors_drained()")
-    # Drain old executors before changing shared schema/release. Profiles omitted
-    # on this run may still have running containers from an earlier placement.
-    drain_local_executors(compose, effective_profiles)
+        f"require_remote_executors_drained(allow_release={release!r})")
     run(*compose, 'run', '--rm', '--no-deps', 'web', 'python', 'manage.py', 'migrate', '--noinput')
     run(*compose, 'run', '--rm', '--no-deps', 'web', 'python', 'manage.py', 'set_deployment_release', '--release', release)
     run(*compose, 'run', '--rm', '--no-deps', '--user', '0', '-v', '/etc/fireisp:/run/bootstrap', 'web', 'python', 'manage.py', 'bootstrap', '--invitation-file', '/run/bootstrap/first-login.txt', '--url', f'https://{options.hostname}')

@@ -1,10 +1,39 @@
 # Installation, upgrades and recovery
 
+## One-line installation
+
+On Ubuntu 24.04, connect through an interactive SSH terminal and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vothalvino/fireisp/main/install.sh | sudo bash
+```
+
+Choose **Main server** for the first host and select the modules to run locally.
+Billing, Finkok/PDF and network processing are selected initially. The main web
+application, database, broker, core events and scheduler are always installed.
+Module selection controls execution placement, not which screens or business
+features the shared application contains.
+
+On a later host, use the same command and choose **Additional server**. Select
+one or several execution modules, supply the main server's SSH hostname/IP and
+port, and authenticate for enrollment. The wizard installs the matching release
+and creates a persistent restricted SSH tunnel automatically. See
+[additional-server setup](distributed-deployment.md#connect-an-additional-server)
+for firewall requirements and moving existing work.
+
+The bootstrap downloads one exact Git commit into a protected, read-only release
+directory under `/opt/fireisp/installer/releases`. It preserves terminal prompts
+even when piped into Bash. `--help` displays its options; an inspected older
+release can be selected with `sudo bash -s -- --release FULL_GIT_SHA` at the end
+of the command. Installation choices are saved only after success in the
+root-only `/etc/fireisp/wizard.json`. Reruns offer the current local selection.
+
 ## Architecture
 
 The staging application runs at `https://demo2.opentrk.com.mx` on Ubuntu 24.04,
-4 vCPUs and approximately 3.7 GiB RAM. The inspected source is in
-`/opt/fireisp/app`; Compose configuration is in `/opt/fireisp/staging`.
+4 vCPUs and approximately 3.7 GiB RAM. `/opt/fireisp/app` points to the inspected
+release after a wizard installation; Compose configuration is in
+`/opt/fireisp/staging`.
 
 Caddy terminates HTTPS. Django/Gunicorn serves the application; PostgreSQL 17
 stores business state. Valkey and Celery deliver durable outbox events and
@@ -13,8 +42,11 @@ FreeRADIUS authenticates subscribers on private tunnel addresses. Application
 containers have memory limits; the web process is unprivileged, read-only,
 and has neither the Docker socket nor the provisioning-agent socket.
 
-Only HTTP/HTTPS are publicly published by Compose. The application callback
-port is bound to `127.0.0.1:18000`; PostgreSQL and Valkey have no published port.
+Only HTTP/HTTPS are publicly published by Compose. PostgreSQL, Valkey and the
+application callback use loopback-only listeners at `127.0.0.1:15432`,
+`127.0.0.1:16379` and `127.0.0.1:18000`. Additional servers reach these listeners
+through their restricted SSH tunnels. Docker Engine 28 or newer is required
+before installing this layout.
 Caddy rejects public `/network/radius/` requests. RADIUS listeners and allowed
 NAS addresses are managed by the network module. Provider firewall rules are
 external prerequisites when no provider API is connected.
@@ -29,10 +61,12 @@ installer verifies the hostname resolves to the supplied IPv4 and reports any
 observed conflicting AAAA records. Completion requires verified public HTTPS
 and both application/database readiness flags.
 
-Clone an inspected release into `/opt/fireisp/app`, then run:
+Use the one-line wizard above and choose **Main server**. It asks for the domain,
+public IPv4 and local module selection. For an advanced scripted installation
+from an inspected checkout, the underlying installer remains available:
 
 ```bash
-sudo python3 /opt/fireisp/app/deploy/install.py --hostname isp.example.com --public-ip 203.0.113.10 --demo-data
+sudo python3 deploy/install.py --hostname isp.example.com --public-ip YOUR_PUBLIC_IPV4 --local-workers billing,fiscal,network
 ```
 
 Replace the example values. The installer installs Docker Engine/Compose from
@@ -40,7 +74,7 @@ Docker's Ubuntu repository when needed, installs `age`, prepares PPP devices,
 generates secrets, validates Compose and Caddy, builds containers, migrates the
 database and initializes the organization, roles and administrator invitation.
 Reruns preserve generated secrets and update hostname/source configuration.
-`--demo-data` is optional and idempotent.
+The underlying command's `--demo-data` option is optional and idempotent.
 
 The administrator invitation is root-only at `/etc/fireisp/first-login.txt`,
 expires after 24 hours and is usable once. The administrator sets their own
@@ -83,6 +117,12 @@ previous source revision and image digest. Run the installer against the new
 checkout to rebuild and migrate; it does not reset application or router state.
 Reruns may briefly interrupt management requests. Schedule router provisioning
 outside that window.
+
+If additional servers are connected, first drain their execution roles as
+described in the [distributed upgrade prerequisites](distributed-deployment.md#prerequisites).
+After upgrading the main server, rerun the one-line wizard on each additional
+server. It obtains the main server's exact release rather than independently
+upgrading a worker to the newest repository commit.
 
 Schema downgrades are not automatic. If a migration is incompatible with the
 previous release, recover into a separate instance from the verified pre-upgrade

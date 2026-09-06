@@ -82,19 +82,28 @@ DEBUG=true .venv/bin/python manage.py makemigrations --check --dry-run
 
 ## Deploy
 
-From an inspected checkout on Ubuntu 24.04:
+Run this on an Ubuntu 24.04 server:
 
 ```bash
-sudo python3 deploy/install.py --hostname isp.example.com --public-ip 203.0.113.10 --demo-data
+curl -fsSL https://raw.githubusercontent.com/vothalvino/fireisp/main/install.sh | sudo bash
 ```
 
-Replace the example hostname/IP with your server. Configure DNS and provider
-firewall access first. The installer generates private application credentials
-and writes the administrator invitation to `/etc/fireisp/first-login.txt`.
-See [installation, upgrades and recovery](docs/deployment.md). Keep this default
-until measured load justifies moving a role; the
-[additional-node installer](docs/distributed-deployment.md) connects to the same
-deployment without creating another database or administrator account.
+Choose **Main server** for the first installation, then select local billing,
+Finkok/PDF and network modules. All three are selected initially, so the ISP can
+start on one server. Configure its domain and inbound TCP 80/443 first.
+
+Later, run the same command on another server and choose **Additional server**.
+Select its execution modules and enter the main server's SSH connection details.
+The wizard verifies the SSH host identity, enrolls a restricted connection key,
+and maintains an encrypted tunnel using the main server's exact application
+release. No database passwords need to be copied manually. Allow the additional
+server's IP through the main server's SSH firewall.
+
+These selections control where background work runs; customers, plans and other
+application features remain part of the shared application. See
+[installation and recovery](docs/deployment.md) and
+[adding or moving modules](docs/distributed-deployment.md). The first administrator
+invitation is stored privately at `/etc/fireisp/first-login.txt` on the main server.
 
 ## License
 

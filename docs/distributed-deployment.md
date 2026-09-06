@@ -6,10 +6,67 @@ The same release can run selected execution roles on different hosts. PostgreSQL
 and Redis remain shared services; this is one application with distributed
 execution, not separate databases for each business module.
 
-The main installer writes `COMPOSE_PROFILES=billing,fiscal,network` on the first
-installation and preserves it on subsequent runs. Web, core events and the
-scheduler also run locally. No second server, registry or private network is
-required for this initial layout.
+On the first server, run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/vothalvino/fireisp/main/install.sh | sudo bash
+```
+
+Choose **Main server** and accept billing, fiscal and network for the initial
+single-server layout. Web, core events and the scheduler also run locally. The
+wizard saves the selected placement in `COMPOSE_PROFILES`; later runs offer the
+existing selection. These are execution modules: selecting a worker location
+does not remove customers, plans or other business features from the application.
+
+## Connect an additional server
+
+Run the same command on the additional Ubuntu 24.04 server and choose
+**Additional server**. Select one or several modules, give this server a unique
+name, and enter the main server's SSH hostname/IP, port and administrator user.
+Use root or an administrator with passwordless `sudo` for the enrollment helper.
+You can supply an existing SSH private-key path or let OpenSSH request the
+administrator password directly from the terminal. The installer does not save
+that password. Subsequent enrollment changes may require administrator
+authentication again; the persistent connection uses its own restricted key.
+
+During first enrollment, verify the main server's SSH host-key fingerprint
+against its console or another trusted record before accepting OpenSSH's prompt.
+For an Ed25519 host key, obtain the fingerprint on the main server with
+`sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. The accepted host identity
+is pinned for the continuing connection.
+
+The wizard transfers the required application settings over authenticated SSH;
+there is no manual database-password copying. It creates a dedicated key limited
+to forwarding the main server's loopback PostgreSQL, Valkey and private web
+listeners. The main server's PostgreSQL administrator password is excluded. A
+systemd service named `fireisp-link-NODE-ID.service` keeps the encrypted connection
+running across restarts. Key material and connection settings are owner-only
+under `/etc/fireisp/connections/NODE-ID`.
+
+Prepare these connections before installation:
+
+- The main server needs DNS pointing at its public IPv4 and inbound TCP 80/443
+  for the application and certificate. Its SSH port must allow the additional
+  server's source IP in the provider firewall and any host firewall.
+- The additional server needs outbound access to the main server's SSH port and
+  HTTPS access for source, packages and container images. Billing and fiscal
+  workers do not need inbound 80/443 or their own public domain.
+- The main server must already use the installer supporting enrollment and
+  Docker Engine 28 or newer. PostgreSQL listens only on `127.0.0.1:15432`, Valkey
+  on `127.0.0.1:16379`, and the private application on `127.0.0.1:18000`.
+  These ports should remain unavailable from the public Internet.
+- A network node also needs its own public IPv4 and the router-tunnel access
+  required by the network provisioning workflow. Public RADIUS callbacks remain
+  blocked; the node uses the private connection.
+
+The additional server automatically downloads and builds the main server's
+exact committed release. It starts only selected execution roles, verifies their
+runtime heartbeats, and creates no database, administrator, migration or second
+ISP account. For multiple modules, generated role IDs are `NODE-ID-billing`,
+`NODE-ID-fiscal`, and so on. Rerunning the wizard installs the selected roles and
+stops removed roles belonging to that same installation only after the selected
+roles report healthy. Adding a remote worker does not automatically stop the
+corresponding main-server worker; use the move procedure below after validation.
 
 | Execution role | Work performed | How it grows |
 | --- | --- | --- |
@@ -35,23 +92,21 @@ configuration, and accounting journal. Those files do not belong on web workers.
    `python manage.py set_deployment_release --release FULL_GIT_SHA` as part of the
    controlled deployment. Do not change the shared release just to bypass a
    mismatched image. Nodes validate it before starting their work.
-2. Prepare Ubuntu 24.04 and Docker Engine with the Compose plugin on each new
-   server. The node installer deliberately does not initialize databases, create
-   administrator accounts, run migrations, or expose database/cache ports.
-3. Provide private access to the existing PostgreSQL and Redis. Use an encrypted
-   private network, verified service TLS, or operator-managed SSH tunnels with
-   pinned host keys. Restrict access to the intended node IPs. The validator
-   requires private endpoint addresses; it rejects public addresses even with TLS.
-4. Copy the existing `SECRET_KEY` and `ENCRYPTION_KEY`, the application database
-   URL, Redis URL, and host/origin settings into an owner-only environment file
-   outside Git. Start with `deploy/nodes/environment.example`. Do not copy the
-   PostgreSQL administrator password. The installer forwards only an explicit
-   role-specific allowlist and checks that the connected database user has no
-   superuser, `CREATEDB`, or `CREATEROLE` permissions.
-5. Give each execution instance a distinct lowercase node ID, such as `fiscal-1`.
-   A network node additionally needs its registered token, its own public IPv4
-   router-tunnel endpoint, and a reachable **private** RADIUS callback URL. Public
-   HTTPS blocks `/network/radius`; it is not a substitute for private connectivity.
+2. Prepare Ubuntu 24.04 on each additional server. The wizard installs Docker
+   Engine and the Compose plugin when needed and configures the SSH connection.
+   It checks database permissions, pending migrations, shared release and broker
+   connectivity before starting roles. The database user must have no superuser,
+   `CREATEDB` or `CREATEROLE` permissions.
+3. Give each additional server a distinct lowercase name. A network node also
+   needs its own public IPv4 router-tunnel endpoint. Enrollment registers that
+   node and its token; it does not relocate an already provisioned router.
+
+For an existing operator-managed private network, the lower-level node installer
+also accepts an owner-only environment file and private service URLs, as shown
+below. Use `deploy/nodes/environment.example` and provide the shared application
+keys and application database credentials without the PostgreSQL administrator
+password. This manual path is optional; the interactive wizard supplies its
+settings through SSH automatically.
 
 Shared application keys let a worker read encrypted application records. This
 deployment isolates execution resources and privileged network components; it
@@ -63,7 +118,7 @@ can still produce duplicate queue deliveries during detection or broker recovery
 Job claims and idempotent business operations remain necessary; scheduler
 leadership is not an exactly-once delivery guarantee.
 
-## Install a role
+## Advanced: install a role directly
 
 These commands assume an inspected checkout contains the same committed release
 as the control server. Replace the example full SHA with that release. The file
@@ -131,7 +186,9 @@ mounted read-only at `/run/fireisp-certs`. Set the service URL's supported CA-fi
 option to the mounted path. Make CA files readable by container UID 1000; do not
 put unrelated credentials in this directory.
 
-For SSH tunnels, establish and supervise them separately using a dedicated SSH
+The interactive wizard already establishes and supervises its restricted SSH
+tunnel. If using the advanced direct installer with your own SSH tunnels,
+establish and supervise them separately using a dedicated SSH
 key, verified `known_hosts`, strict host-key checking, and
 `ExitOnForwardFailure=yes`. Restrict the remote account/key to the intended
 forwarding destinations. Bind each local forwarding listener to `127.0.0.1`.
@@ -150,7 +207,8 @@ addresses generated by the reviewed network provisioning workflow.
 ## Move one role safely
 
 1. Start with the default single-server installation and take a verified backup.
-2. Add one remote role using the same release, keys, and shared services.
+2. Run the one-line wizard on another server, choose **Additional server**, and
+   select the role. Enrollment obtains the matching release and shared settings.
 3. Confirm the new node's fresh heartbeat and correct release. Submit a demo job
    for its queue and confirm the result from the existing web application. For
    fiscal work, confirm XML/PDF retrieval from a different web instance. For a
@@ -159,13 +217,27 @@ addresses generated by the reviewed network provisioning workflow.
    Do not use `kill -9` to transfer fiscal work: an interrupted external request
    can have an uncertain provider result requiring recovery. Keep core and billing
    workers running while moving fiscal work, and keep one active scheduler.
-   Persist the local placement with the main installer's `--local-workers`
+   On the main server, rerun the wizard at the same release and deselect the moved
+   role, or persist the local placement with the main installer's `--local-workers`
    option: `--local-workers billing,network` removes local fiscal execution;
    `--local-workers billing,fiscal,network` restores all three local roles.
    Use the existing hostname, public IP and same release/source arguments. A
    normal installer rerun without this option preserves the saved selection.
 5. Watch queue backlog, processing latency, failures, database connections, memory,
    and node heartbeat freshness before moving another role.
+
+When changing only placement, pin the wizard to the main server's current full
+Git SHA so a newer repository `main` does not turn the change into an upgrade:
+
+```sh
+sudo docker compose --project-directory /opt/fireisp/staging exec -T web python manage.py shell -c "from django.conf import settings; print(settings.FIREISP_RELEASE)"
+curl -fsSL https://raw.githubusercontent.com/vothalvino/fireisp/main/install.sh | sudo bash -s -- --release FULL_GIT_SHA
+```
+
+Replace `FULL_GIT_SHA` with the release printed by the first command. A placement
+rerun can keep remote workers active only when the declared release matches and
+there are no pending migrations. A release or schema change still requires the
+coordinated remote drain described above.
 
 For rollback within the same release, stop the remote role gracefully and restart
 the previous role on the control server. Shared durable jobs remain in the broker
@@ -178,6 +250,11 @@ Moving a router between network nodes is an explicit provisioning change. Keep
 its old local accounting journal until all records have replayed and its private
 interfaces have been cleaned up. Do not copy agent sockets or point two active
 node IDs at the same router as a shortcut.
+
+Selecting a new network module registers a new node but leaves existing routers
+on their current node. Plan the router endpoint change, drain its jobs, replay
+accounting, and validate authentication and accounting on the destination before
+retiring its old network processes. Module installation alone is not that cutover.
 
 ## Remaining shared infrastructure
 

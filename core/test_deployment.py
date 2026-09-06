@@ -313,6 +313,50 @@ class InstallerSafetyTests(SimpleTestCase):
             with self.assertRaisesMessage(SystemExit, 'Gracefully drain remote nodes before migrating'):
                 install.require_remote_executors_drained()
 
+    def test_same_release_placement_rerun_allows_remote_workers_only_with_no_pending_migrations(self):
+        release = 'a' * 40
+        with patch('django.db.connection.introspection.table_names', return_value=['core_runtimenode']), \
+                patch('core.models.DeploymentState.objects.filter') as state, \
+                patch('django.db.migrations.executor.MigrationExecutor') as executor, \
+                patch('core.models.RuntimeNode.objects.filter') as workers:
+            state.return_value.values_list.return_value.first.return_value = release
+            executor.return_value.loader.graph.leaf_nodes.return_value = [('core', 'latest')]
+            executor.return_value.migration_plan.return_value = []
+            install.require_remote_executors_drained(allow_release=release)
+        executor.return_value.migration_plan.assert_called_once_with([('core', 'latest')])
+        workers.assert_not_called()
+
+    def test_different_or_uninitialized_release_still_requires_remote_workers_drained(self):
+        now = datetime(2026, 9, 6, tzinfo=timezone.utc)
+        for current_release in ('b' * 40, None):
+            with self.subTest(current_release=current_release), \
+                    patch('django.db.connection.introspection.table_names', return_value=['core_runtimenode']), \
+                    patch('django.utils.timezone.now', return_value=now), \
+                    patch('core.models.DeploymentState.objects.filter') as state, \
+                    patch('django.db.migrations.executor.MigrationExecutor') as executor, \
+                    patch('core.models.RuntimeNode.objects.filter') as workers:
+                state.return_value.values_list.return_value.first.return_value = current_release
+                workers.return_value.values.return_value = [{'identifier': 'fiscal-2:fiscal', 'role': 'fiscal',
+                                                             'status': 'ready', 'last_seen': now}]
+                with self.assertRaisesMessage(SystemExit, 'Gracefully drain remote nodes before migrating'):
+                    install.require_remote_executors_drained(allow_release='a' * 40)
+                executor.assert_not_called()
+
+    def test_same_release_with_pending_migration_still_requires_remote_workers_drained(self):
+        release = 'a' * 40
+        now = datetime(2026, 9, 6, tzinfo=timezone.utc)
+        with patch('django.db.connection.introspection.table_names', return_value=['core_runtimenode']), \
+                patch('django.utils.timezone.now', return_value=now), \
+                patch('core.models.DeploymentState.objects.filter') as state, \
+                patch('django.db.migrations.executor.MigrationExecutor') as executor, \
+                patch('core.models.RuntimeNode.objects.filter') as workers:
+            state.return_value.values_list.return_value.first.return_value = release
+            executor.return_value.migration_plan.return_value = [('pending migration', False)]
+            workers.return_value.values.return_value = [{'identifier': 'fiscal-2:fiscal', 'role': 'fiscal',
+                                                         'status': 'ready', 'last_seen': now}]
+            with self.assertRaisesMessage(SystemExit, 'Gracefully drain remote nodes before migrating'):
+                install.require_remote_executors_drained(allow_release=release)
+
     def test_private_writer_refuses_symlink_without_touching_target(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
